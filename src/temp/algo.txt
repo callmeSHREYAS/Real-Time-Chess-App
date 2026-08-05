@@ -1,0 +1,42 @@
+Pawn
+isValidPawnMove(fromRow,fromCol, toRow,toCol): // matrix format 0 to 7 and 0 to 7
+    1: are parameters are in 0 to 7 if no , write false;
+    is peice is pawn , if no - false
+
+    st_ind=toInd(fromRow,fromCol)
+    end_ind=toInd(toRow,toCol)
+    colDIff= absolute , Rowdiff  will calculated
+
+
+    CASE 1 — single step forward:
+
+    if(coldiff==0  , rowdiff==1){
+        if(board[end_ind]==null):
+            return true
+    } 
+
+    else
+
+    CASE 2 — double step forward (first move only):
+
+    if(coldiff==0  , rowdiff==2){
+        st_idx=-1;
+        if(color=white) ? st_idx= 1: 6
+        if(fromRow == st_idx &&  board[st_ind+8] == none && board[to_ind] == none):
+            return true
+    } 
+
+    Case 3 : diagonal
+
+    if(rowdiff == colDIff == 1):
+        if(board[toInd]  peice color is opposite color):
+            return true
+
+
+
+
+
+
+ROOK
+
+check rowdiff or coldiff and vice versa are in 2 and 1  and if yes then check is that place is taken by opposite , by own peice or null and based on that return true/false
