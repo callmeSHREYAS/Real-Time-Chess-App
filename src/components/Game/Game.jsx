@@ -8,6 +8,7 @@ export default function Game() {
   const location = useLocation()
   const navigate = useNavigate()
   const userColor = location.state?.userColor  // 'white' or 'black'
+  const depth = location.state?.depth ?? 3
 
   // if someone navigates to /chessboard directly without picking a color
   useEffect(() => {
@@ -21,7 +22,7 @@ export default function Game() {
 
   return (
     <div style={styles.container}>
-      <ChessBoard initialBoard={board} userColor={colorConst} />
+      <ChessBoard initialBoard={board} userColor={colorConst} depth={depth} />
 
       <button style={styles.back} onClick={() => navigate('/')}>
         ← New Game

@@ -8,11 +8,7 @@ import { Color, Piece, pieceType, toIndex, toRowCol } from "../board"
 import { getAllMoves } from "../getAllMoves/getAllMoves"
 import { minimax } from "../minimax/minimax"
 
-
-
-const DEPTH = 5  // increase to 4 once working, 3 is safe for now
-
-export function getBestMove(board, aiColor, gameState, enPassantSquare) {
+export function getBestMove(board, aiColor, gameState, enPassantSquare, depth = 3) {
 
     const moves = getAllMoves(board, aiColor, gameState, enPassantSquare)
 
@@ -57,7 +53,7 @@ export function getBestMove(board, aiColor, gameState, enPassantSquare) {
         // score this move
         const score = minimax(
             newBoard,
-            DEPTH - 1,
+            depth - 1,
             -Infinity,
             Infinity,
             !isMaximizing,  // next turn is opponent

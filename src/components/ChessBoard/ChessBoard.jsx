@@ -73,7 +73,7 @@ function updateGameState(gameState, fromIndex, board) {
 
 
 
-export default function ChessBoard({ initialBoard, userColor }) {
+export default function ChessBoard({ initialBoard, userColor, depth }) {
     const [board, setBoard] = useState(initialBoard)
     const [selected, setSelected] = useState(null)
     const [currentTurn, setCurrentTurn] = useState(Color.White)
@@ -120,7 +120,8 @@ export default function ChessBoard({ initialBoard, userColor }) {
             board,
             aiColor,
             gameState,
-            enPassantSquare
+            enPassantSquare,
+            depth,
         })
 
         // ── Receive result from worker ────────────────────────────────────────
@@ -215,7 +216,7 @@ export default function ChessBoard({ initialBoard, userColor }) {
             aiMoveInProgress.current = false
         }
 
-    }, [currentTurn])
+    }, [currentTurn, depth])
 
 
     // ── Player click handler ──────────────────────────────────────────────────

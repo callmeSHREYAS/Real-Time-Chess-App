@@ -1,16 +1,46 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+
+const DIFFICULTY_DEPTH = {
+  easy: 2,
+  medium: 3,
+  hard: 5,
+  extreme: 6,
+}
 
 export default function ColorPicker() {
   const navigate = useNavigate()
+  const [difficulty, setDifficulty] = useState('medium')
 
   function handleChoice(color) {
-    navigate('/chessboard', { state: { userColor: color } })
+    const depth = DIFFICULTY_DEPTH[difficulty]
+    navigate('/chessboard', { state: { userColor: color, difficulty, depth } })
   }
 
   return (
     <div style={styles.container}>
       <h1 style={styles.title}>Chess</h1>
       <p style={styles.subtitle}>Choose your side</p>
+
+      <div style={styles.difficultyBox}>
+        <span style={styles.difficultyLabel}>Difficulty</span>
+        <div style={styles.difficultyOptions}>
+          {Object.entries(DIFFICULTY_DEPTH).map(([name, depth]) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => setDifficulty(name)}
+              style={{
+                ...styles.difficultyButton,
+                ...(difficulty === name ? styles.difficultyButtonActive : {}),
+              }}
+            >
+              <span style={styles.difficultyName}>{name}</span>
+              <span style={styles.difficultyDepth}>Depth {depth}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div style={styles.cards}>
 
@@ -56,6 +86,53 @@ const styles = {
     fontFamily: 'monospace',
     margin: 0,
     letterSpacing: '2px',
+  },
+  difficultyBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  difficultyLabel: {
+    color: '#888',
+    fontSize: '13px',
+    fontFamily: 'monospace',
+    letterSpacing: '2px',
+    textTransform: 'uppercase',
+  },
+  difficultyOptions: {
+    display: 'flex',
+    gap: '10px',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  difficultyButton: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '4px',
+    minWidth: '90px',
+    padding: '10px 12px',
+    backgroundColor: '#2a2a2a',
+    border: '1px solid #3c2f24',
+    borderRadius: '8px',
+    color: '#888',
+    cursor: 'pointer',
+    fontFamily: 'monospace',
+    textTransform: 'capitalize',
+  },
+  difficultyButtonActive: {
+    borderColor: '#b58863',
+    color: '#f0d9b5',
+    backgroundColor: '#3c2f24',
+  },
+  difficultyName: {
+    fontSize: '13px',
+    fontWeight: 700,
+  },
+  difficultyDepth: {
+    fontSize: '10px',
+    color: '#666',
   },
   cards: {
     display: 'flex',
