@@ -12,7 +12,7 @@ export default function Game() {
 
   // if someone navigates to /chessboard directly without picking a color
   useEffect(() => {
-    if (!userColor) navigate('/')
+    if (!userColor) navigate('/computer')
   }, [userColor, navigate])
 
   if (!userColor) return null
@@ -24,7 +24,7 @@ export default function Game() {
     <div style={styles.container}>
       <ChessBoard initialBoard={board} userColor={colorConst} depth={depth} />
 
-      <button style={styles.back} onClick={() => navigate('/')}>
+      <button style={styles.back} onClick={() => navigate('/computer')}>
         ← New Game
       </button>
     </div>

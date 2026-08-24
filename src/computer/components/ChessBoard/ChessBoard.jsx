@@ -568,7 +568,7 @@ export default function ChessBoard({ initialBoard, userColor, depth }) {
                     </div>
                     <button
                         style={styles.playAgainBtn}
-                        onClick={() => window.location.href = '/'}
+                        onClick={() => window.location.href = '/computer'}
                     >
                         Play Again
                     </button>
