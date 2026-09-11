@@ -8,7 +8,11 @@ import {
     Piece,
     Color,
 } from '../computer/engine/board.js'
+import { applyMove } from '../computer/engine/applyMove.js'
 import { getLegalTargets } from '../computer/checkSqrs/getLegalTargets.js'
+import { isValidMove } from '../computer/engine/getMoveHelper/isValidMove.js'
+import { checkGameStatus } from '../computer/checkSqrs/checkGameStatus .js'
+import { DEFAULT_GAME_STATE, updateGameStateAfterMove } from '../computer/engine/gameState.js'
 import PromotionModal from '../computer/engine/PromotionModal/PromotionModal.jsx'
 import CapturedPieces from '../computer/components/CapturedPieces/CapturedPieces.jsx'
 
@@ -30,40 +34,55 @@ const PIECE_UNICODE = {
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 const FINISHED_STATUSES = ['checkmate-white', 'checkmate-black', 'stalemate']
 
-export default function PvpChessBoard({
-    board,
-    currentTurn,
-    gameState,
-    enPassantSquare,
-    gameStatus,
-    capturedWhite,
-    capturedBlack,
-    yourColor,
-    whiteUsername,
-    blackUsername,
-    disabled,
-    onMoveAttempt,
-}) {
-    const [selected, setSelected] = useState(null)
-    const [legalSquares, setLegalSquares] = useState([])
-    const [pendingPromotion, setPendingPromotion] = useState(null)
+function nextColor(color) {
+    return color === Color.White ? Color.Black : Color.White
+}
 
-    function canMoveNow() {
-        return !disabled &&
-            !pendingPromotion &&
-            !FINISHED_STATUSES.includes(gameStatus) &&
-            currentTurn === yourColor
+function addCapturedPiece(piece, setCapturedWhite, setCapturedBlack) {
+    if (isEmpty(piece)) return
+
+    if (pieceColor(piece) === Color.White) {
+        setCapturedWhite(prev => [...prev, { piece }])
+    } else {
+        setCapturedBlack(prev => [...prev, { piece }])
+    }
+}
+
+export default function PvpChessBoard({ initialBoard }) {
+    const [board, setBoard] = useState(initialBoard)
+    const [selected, setSelected] = useState(null)
+    const [currentTurn, setCurrentTurn] = useState(Color.White)
+    const [enPassantSquare, setEnPassantSquare] = useState(null)
+    const [gameState, setGameState] = useState(DEFAULT_GAME_STATE)
+    const [legalSquares, setLegalSquares] = useState([])
+    const [gameStatus, setGameStatus] = useState(null)
+    const [pendingPromotion, setPendingPromotion] = useState(null)
+    const [capturedWhite, setCapturedWhite] = useState([])
+    const [capturedBlack, setCapturedBlack] = useState([])
+
+    function commitMove(nextBoard, nextTurn, nextGameState, nextEnPassant, capturedPiece) {
+        const status = checkGameStatus(nextBoard, nextTurn, nextGameState, nextEnPassant)
+
+        addCapturedPiece(capturedPiece, setCapturedWhite, setCapturedBlack)
+        setGameStatus(status)
+        setBoard(nextBoard)
+        setEnPassantSquare(nextEnPassant)
+        setGameState(nextGameState)
+        setCurrentTurn(nextTurn)
+        setSelected(null)
+        setLegalSquares([])
     }
 
     function handleSquareClick(index) {
-        if (!canMoveNow()) return
+        if (pendingPromotion) return
+        if (FINISHED_STATUSES.includes(gameStatus)) return
 
         const piece = board[index]
 
         if (selected === null) {
-            if (isEmpty(piece) || pieceColor(piece) !== yourColor) return
+            if (isEmpty(piece) || pieceColor(piece) !== currentTurn) return
             setSelected(index)
-            setLegalSquares(getLegalTargets(index, board, yourColor, gameState, enPassantSquare))
+            setLegalSquares(getLegalTargets(index, board, currentTurn, gameState, enPassantSquare))
             return
         }
 
@@ -73,60 +92,88 @@ export default function PvpChessBoard({
             return
         }
 
-        if (!isEmpty(piece) && pieceColor(piece) === yourColor) {
+        if (!isEmpty(piece) && pieceColor(piece) === currentTurn) {
             setSelected(index)
-            setLegalSquares(getLegalTargets(index, board, yourColor, gameState, enPassantSquare))
+            setLegalSquares(getLegalTargets(index, board, currentTurn, gameState, enPassantSquare))
             return
         }
 
-        const { row: toRow } = toRowCol(index)
-        const movingType = pieceType(board[selected])
+        const { row: fromRow, col: fromCol } = toRowCol(selected)
+        const { row: toRow, col: toCol } = toRowCol(index)
 
-        if (!legalSquares.includes(index)) {
+        if (!isValidMove(fromRow, fromCol, toRow, toCol, board, currentTurn, gameState, enPassantSquare)) {
             setSelected(null)
             setLegalSquares([])
             return
         }
 
+        const movingType = pieceType(board[selected])
+        let capturedPiece = board[index]
+        let nextBoard = applyMove(board, selected, index)
+        let nextEnPassant = null
+        const nextGameState = updateGameStateAfterMove(gameState, selected, index, board)
+
+        if (movingType === Piece.King && Math.abs(toCol - fromCol) === 2) {
+            const backRank = currentTurn === Color.White ? 0 : 7
+            if (toCol === 6) {
+                nextBoard = applyMove(nextBoard, toIndex(backRank, 7), toIndex(backRank, 5))
+            } else if (toCol === 2) {
+                nextBoard = applyMove(nextBoard, toIndex(backRank, 0), toIndex(backRank, 3))
+            }
+        }
+
+        if (movingType === Piece.Pawn && index === enPassantSquare) {
+            const direction = currentTurn === Color.White ? -1 : 1
+            const capturedIdx = toIndex(toRow + direction, toCol)
+            capturedPiece = board[capturedIdx]
+            nextBoard = [...nextBoard]
+            nextBoard[capturedIdx] = Piece.None
+        }
+
+        if (movingType === Piece.Pawn && Math.abs(toRow - fromRow) === 2) {
+            const direction = currentTurn === Color.White ? 1 : -1
+            nextEnPassant = toIndex(fromRow + direction, fromCol)
+        }
+
+        const turnAfterMove = nextColor(currentTurn)
         if (movingType === Piece.Pawn && (toRow === 7 || toRow === 0)) {
-            setPendingPromotion({ fromIdx: selected, toIdx: index, color: yourColor })
+            setPendingPromotion({
+                boardAfterMove: nextBoard,
+                promotionIdx: index,
+                color: currentTurn,
+                nextTurn: turnAfterMove,
+                nextEnPassant,
+                nextGameState,
+                capturedPiece,
+            })
             return
         }
 
-        onMoveAttempt({ fromIdx: selected, toIdx: index })
-        setSelected(null)
-        setLegalSquares([])
+        commitMove(nextBoard, turnAfterMove, nextGameState, nextEnPassant, capturedPiece)
     }
 
-    function handlePromotionChoice(promotionPieceType) {
+    function handlePromotionChoice(chosenPieceType) {
         if (!pendingPromotion) return
 
-        onMoveAttempt({
-            fromIdx: pendingPromotion.fromIdx,
-            toIdx: pendingPromotion.toIdx,
-            promotionPieceType,
-        })
+        const nextBoard = [...pendingPromotion.boardAfterMove]
+        nextBoard[pendingPromotion.promotionIdx] = pendingPromotion.color | chosenPieceType
+
+        commitMove(
+            nextBoard,
+            pendingPromotion.nextTurn,
+            pendingPromotion.nextGameState,
+            pendingPromotion.nextEnPassant,
+            pendingPromotion.capturedPiece
+        )
         setPendingPromotion(null)
-        setSelected(null)
-        setLegalSquares([])
     }
 
     const squares = []
-    if (yourColor === Color.Black) {
-        for (let row = 0; row <= 7; row++) {
-            for (let col = 7; col >= 0; col--) {
-                squares.push({ index: toIndex(row, col), row, col })
-            }
-        }
-    } else {
-        for (let row = 7; row >= 0; row--) {
-            for (let col = 0; col < 8; col++) {
-                squares.push({ index: toIndex(row, col), row, col })
-            }
+    for (let row = 7; row >= 0; row--) {
+        for (let col = 0; col < 8; col++) {
+            squares.push({ index: toIndex(row, col), row, col })
         }
     }
-
-    const statusText = getStatusText(gameStatus, currentTurn, yourColor, whiteUsername, blackUsername)
 
     return (
         <div style={styles.wrapper}>
@@ -135,12 +182,29 @@ export default function PvpChessBoard({
             )}
 
             <div style={styles.statusBar}>
-                <span style={gameStatus ? styles.statusCheck : styles.statusNormal}>
-                    {statusText}
-                </span>
+                {!gameStatus && (
+                    <span style={styles.statusNormal}>
+                        {currentTurn === Color.White ? 'White to move' : 'Black to move'}
+                    </span>
+                )}
+                {gameStatus === 'check-white' && (
+                    <span style={styles.statusCheck}>White is in check</span>
+                )}
+                {gameStatus === 'check-black' && (
+                    <span style={styles.statusCheck}>Black is in check</span>
+                )}
+                {gameStatus === 'checkmate-white' && (
+                    <span style={styles.statusWin}>Checkmate - Black wins</span>
+                )}
+                {gameStatus === 'checkmate-black' && (
+                    <span style={styles.statusWin}>Checkmate - White wins</span>
+                )}
+                {gameStatus === 'stalemate' && (
+                    <span style={styles.statusDraw}>Stalemate - Draw</span>
+                )}
             </div>
 
-            <CapturedPieces captured={capturedBlack || []} playerColor={Color.White} label="White" />
+            <CapturedPieces captured={capturedBlack} playerColor={Color.White} label="White" />
 
             <div style={styles.board}>
                 {squares.map(({ index, row, col }) => {
@@ -161,7 +225,6 @@ export default function PvpChessBoard({
                                 backgroundColor: isSelected
                                     ? '#9bbb59'
                                     : isLight ? '#f0d9b5' : '#b58863',
-                                cursor: canMoveNow() ? 'pointer' : 'default',
                             }}
                         >
                             {col === 0 && (
@@ -201,22 +264,9 @@ export default function PvpChessBoard({
                 })}
             </div>
 
-            <CapturedPieces captured={capturedWhite || []} playerColor={Color.Black} label="Black" />
+            <CapturedPieces captured={capturedWhite} playerColor={Color.Black} label="Black" />
         </div>
     )
-}
-
-function getStatusText(gameStatus, currentTurn, yourColor, whiteUsername, blackUsername) {
-    if (gameStatus === 'check-white') return `${whiteUsername || 'White'} is in check`
-    if (gameStatus === 'check-black') return `${blackUsername || 'Black'} is in check`
-    if (gameStatus === 'checkmate-white') return `Checkmate - ${blackUsername || 'Black'} wins`
-    if (gameStatus === 'checkmate-black') return `Checkmate - ${whiteUsername || 'White'} wins`
-    if (gameStatus === 'stalemate') return 'Stalemate - Draw'
-
-    if (currentTurn === yourColor) return 'Your move'
-    return currentTurn === Color.White
-        ? `${whiteUsername || 'White'} to move`
-        : `${blackUsername || 'Black'} to move`
 }
 
 const styles = {
@@ -242,6 +292,14 @@ const styles = {
         color: '#f0a500',
         fontWeight: 700,
     },
+    statusWin: {
+        color: '#9bbb59',
+        fontWeight: 700,
+    },
+    statusDraw: {
+        color: '#c7c7c7',
+        fontWeight: 700,
+    },
     board: {
         width: 'min(86vw, 520px)',
         aspectRatio: '1 / 1',
@@ -261,6 +319,7 @@ const styles = {
         justifyContent: 'center',
         border: 0,
         padding: 0,
+        cursor: 'pointer',
     },
     piece: {
         fontSize: 'clamp(28px, 8vw, 56px)',
