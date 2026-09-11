@@ -17,7 +17,7 @@ export default function PvpQuickMatch() {
   const [whiteUsername, setWhiteUsername] = useState('')
   const [blackUsername, setBlackUsername] = useState('')
   const [gameSnapshot, setGameSnapshot] = useState(null)
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState('');
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
