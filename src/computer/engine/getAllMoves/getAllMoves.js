@@ -1,6 +1,6 @@
 
 
-import { getLegalTargets } from "../../checkSqrs/getLegalTargets"
+import { getLegalTargets } from "../../checkSqrs/getLegalTargets.js"
 import { isEmpty, pieceColor, toIndex, toRowCol } from "../board.js"
 import { isValidMove } from "../getMoveHelper/isValidMove.js"
 

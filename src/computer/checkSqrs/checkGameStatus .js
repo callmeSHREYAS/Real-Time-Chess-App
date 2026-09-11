@@ -1,6 +1,6 @@
-import { Color } from "../engine/board"
-import { getAllMoves } from "../engine/getAllMoves/getAllMoves"
-import { isInCheck } from "./isInCheck"
+import { Color } from "../engine/board.js"
+import { getAllMoves } from "../engine/getAllMoves/getAllMoves.js"
+import { isInCheck } from "./isInCheck.js"
 
 export function checkGameStatus(board, currentTurn, gameState, enPassantSquare) {
     const moves = getAllMoves(board, currentTurn, gameState, enPassantSquare)

@@ -1,10 +1,10 @@
-import { isValidBishopMove } from "../../validators/Bishop"
-import { isValidKingMove } from "../../validators/King"
-import { isValidKnightMove } from "../../validators/Knight"
-import { isValidPawnMove } from "../../validators/Pawn"
-import { isValidQueenMove } from "../../validators/Queen"
-import { isValidRookMove } from "../../validators/Rook"
-import { Piece, pieceColor, pieceType, toIndex } from "../board"
+import { isValidBishopMove } from "../../validators/Bishop.js"
+import { isValidKingMove } from "../../validators/King.js"
+import { isValidKnightMove } from "../../validators/Knight.js"
+import { isValidPawnMove } from "../../validators/Pawn.js"
+import { isValidQueenMove } from "../../validators/Queen.js"
+import { isValidRookMove } from "../../validators/Rook.js"
+import { Piece, pieceColor, pieceType, toIndex } from "../board.js"
 
 export function isValidMove(fromRow, fromCol, toRow, toCol, board, color, gameState, enPassantSquare) {
     const type = pieceType(board[toIndex(fromRow, fromCol)])

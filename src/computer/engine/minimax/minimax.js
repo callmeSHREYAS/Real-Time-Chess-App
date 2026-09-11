@@ -1,10 +1,10 @@
-import { isInCheck } from "../../checkSqrs/isInCheck"
-import { isKingSafe } from "../../checkSqrs/isKingSafe"
-import { applyMove } from "../applyMove"
-import { Color, isEmpty, Piece, pieceColor, pieceType, toIndex, toRowCol } from "../board"
-import { evaluate } from "../evaluate"
-import { updateGameStateAfterMove } from "../gameState"
-import { getAllMoves } from "../getAllMoves/getAllMoves"
+import { isInCheck } from "../../checkSqrs/isInCheck.js"
+import { isKingSafe } from "../../checkSqrs/isKingSafe.js"
+import { applyMove } from "../applyMove.js"
+import { Color, isEmpty, Piece, pieceColor, pieceType, toIndex, toRowCol } from "../board.js"
+import { evaluate } from "../evaluate.js"
+import { updateGameStateAfterMove } from "../gameState.js"
+import { getAllMoves } from "../getAllMoves/getAllMoves.js"
 
 
 

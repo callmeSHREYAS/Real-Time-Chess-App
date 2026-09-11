@@ -3,11 +3,11 @@
 // import { applyMove } from './applyMove.js'
 // import { pieceType, toIndex, toRowCol, Piece, Color } from './board.js'
 
-import { applyMove } from "../applyMove"
-import { Color, Piece, pieceType, toIndex, toRowCol } from "../board"
-import { updateGameStateAfterMove } from "../gameState"
-import { getAllMoves } from "../getAllMoves/getAllMoves"
-import { minimax } from "../minimax/minimax"
+import { applyMove } from "../applyMove.js"
+import { Color, Piece, pieceType, toIndex, toRowCol } from "../board.js"
+import { updateGameStateAfterMove } from "../gameState.js"
+import { getAllMoves } from "../getAllMoves/getAllMoves.js"
+import { minimax } from "../minimax/minimax.js"
 
 export function getBestMove(board, aiColor, gameState, enPassantSquare, depth = 3) {
 

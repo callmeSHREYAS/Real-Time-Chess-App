@@ -1,5 +1,5 @@
-import { toIndex, toRowCol } from "../engine/board"
-import { isValidMove } from "../engine/getMoveHelper/isValidMove"
+import { toIndex, toRowCol } from "../engine/board.js"
+import { isValidMove } from "../engine/getMoveHelper/isValidMove.js"
 
 export function getLegalTargets(fromIdx, board, color, gameState, enPassantSquare) {
     const { row: fromRow, col: fromCol } = toRowCol(fromIdx)

@@ -1,4 +1,4 @@
-import { Piece } from "./board"
+import { Piece } from "./board.js"
 
 export function applyMove(board, fromIndex, toIndex_) {
     const newBoard = [...board]
