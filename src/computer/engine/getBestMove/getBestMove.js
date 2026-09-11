@@ -5,6 +5,7 @@
 
 import { applyMove } from "../applyMove"
 import { Color, Piece, pieceType, toIndex, toRowCol } from "../board"
+import { updateGameStateAfterMove } from "../gameState"
 import { getAllMoves } from "../getAllMoves/getAllMoves"
 import { minimax } from "../minimax/minimax"
 
@@ -24,6 +25,7 @@ export function getBestMove(board, aiColor, gameState, enPassantSquare, depth = 
         // apply move to temp board
         let newBoard = applyMove(board, move.fromIdx, move.toIdx)
         let newEnPassant = null
+        const newGameState = updateGameStateAfterMove(gameState, move.fromIdx, move.toIdx, board)
 
         const { row: fromRow, col: fromCol } = toRowCol(move.fromIdx)
         const { row: toRow,   col: toCol   } = toRowCol(move.toIdx)
@@ -58,7 +60,7 @@ export function getBestMove(board, aiColor, gameState, enPassantSquare, depth = 
             Infinity,
             !isMaximizing,  // next turn is opponent
             enemyColor,
-            gameState,
+            newGameState,
             newEnPassant
         )
 

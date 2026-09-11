@@ -17,6 +17,7 @@ import { isValidMove } from '../../engine/getMoveHelper/isValidMove.js'
 import { getAllMoves } from '../../engine/getAllMoves/getAllMoves.js'
 import { getBestMove } from '../../engine/getBestMove/getBestMove.js'
 import { checkGameStatus } from '../../checkSqrs/checkGameStatus .js'
+import { DEFAULT_GAME_STATE, updateGameStateAfterMove } from '../../engine/gameState.js'
 import PromotionModal from '../../engine/PromotionModal/PromotionModal.jsx'
 import CapturedPieces from '../CapturedPieces/CapturedPieces.jsx'
 // ── Piece unicode (explicit escapes to avoid encoding issues) ───────────────
@@ -38,41 +39,7 @@ const PIECE_UNICODE = {
 const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 
 // ── gameState for castling rights ────────────────────────────────────────────
-const DEFAULT_GAME_STATE = {
-    whiteKingMoved: false,
-    blackKingMoved: false,
-    whiteRookAMoved: false,
-    whiteRookHMoved: false,
-    blackRookAMoved: false,
-    blackRookHMoved: false,
-}
-
-
 // ── Update castling rights after a move ─────────────────────────────────────
-function updateGameState(gameState, fromIndex, board) {
-    const piece = board[fromIndex]
-    const type = pieceType(piece)
-    const color = pieceColor(piece)
-    const updated = { ...gameState }
-
-    if (type === Piece.King) {
-        if (color === Color.White) updated.whiteKingMoved = true
-        else updated.blackKingMoved = true
-    }
-    if (type === Piece.Rook) {
-        if (fromIndex === 0) updated.whiteRookAMoved = true
-        if (fromIndex === 7) updated.whiteRookHMoved = true
-        if (fromIndex === 56) updated.blackRookAMoved = true
-        if (fromIndex === 63) updated.blackRookHMoved = true
-    }
-    return updated
-}
-
-
-
-
-
-
 export default function ChessBoard({ initialBoard, userColor, depth }) {
     const [board, setBoard] = useState(initialBoard)
     const [selected, setSelected] = useState(null)
@@ -140,7 +107,7 @@ export default function ChessBoard({ initialBoard, userColor, depth }) {
 
             let newBoard = applyMove(board, fromIdx, toIdx)
             let newEnPassant = null
-            let newGameState = updateGameState(gameState, fromIdx, board)
+            let newGameState = updateGameStateAfterMove(gameState, fromIdx, toIdx, board)
             const movingType = pieceType(board[fromIdx])
 
             // castling
@@ -266,7 +233,7 @@ export default function ChessBoard({ initialBoard, userColor, depth }) {
 
         let newBoard = applyMove(board, selected, index)
         let newEnPassant = null
-        let newGameState = updateGameState(gameState, selected, board)
+        let newGameState = updateGameStateAfterMove(gameState, selected, index, board)
 
         const movingType = pieceType(board[selected])
 

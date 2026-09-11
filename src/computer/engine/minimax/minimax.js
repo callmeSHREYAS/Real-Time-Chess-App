@@ -3,14 +3,16 @@ import { isKingSafe } from "../../checkSqrs/isKingSafe"
 import { applyMove } from "../applyMove"
 import { Color, isEmpty, Piece, pieceColor, pieceType, toIndex, toRowCol } from "../board"
 import { evaluate } from "../evaluate"
+import { updateGameStateAfterMove } from "../gameState"
 import { getAllMoves } from "../getAllMoves/getAllMoves"
 
 
 
 // ── Apply move + handle special cases (same logic as ChessBoard) ──────────────
-function applyFullMove(board, fromIdx, toIdx, color, enPassantSquare) {
+function applyFullMove(board, fromIdx, toIdx, color, gameState, enPassantSquare) {
     let newBoard = applyMove(board, fromIdx, toIdx)
     let newEnPassant = null
+    const newGameState = updateGameStateAfterMove(gameState, fromIdx, toIdx, board)
 
     const { row: fromRow, col: fromCol } = toRowCol(fromIdx)
     const { row: toRow, col: toCol } = toRowCol(toIdx)
@@ -46,7 +48,7 @@ function applyFullMove(board, fromIdx, toIdx, color, enPassantSquare) {
         newBoard[toIdx] = color | Piece.Queen
     }
 
-    return { newBoard, newEnPassant }
+    return { newBoard, newGameState, newEnPassant }
 }
 
 // in minimax.js, before the move loop
@@ -109,8 +111,8 @@ export function minimax(board, depth, alpha, beta, isMaximizing, color, gameStat
         let best = -Infinity
 
         for (const move of moves) {
-            const { newBoard, newEnPassant } = applyFullMove(
-                board, move.fromIdx, move.toIdx, color, enPassantSquare
+            const { newBoard, newGameState, newEnPassant } = applyFullMove(
+                board, move.fromIdx, move.toIdx, color, gameState, enPassantSquare
             )
 
             const score = minimax(
@@ -120,7 +122,7 @@ export function minimax(board, depth, alpha, beta, isMaximizing, color, gameStat
                 beta,
                 false,          // next turn is minimizing (black)
                 enemyColor,
-                gameState,
+                newGameState,
                 newEnPassant
             )
 
@@ -136,8 +138,8 @@ export function minimax(board, depth, alpha, beta, isMaximizing, color, gameStat
         let best = Infinity
 
         for (const move of moves) {
-            const { newBoard, newEnPassant } = applyFullMove(
-                board, move.fromIdx, move.toIdx, color, enPassantSquare
+            const { newBoard, newGameState, newEnPassant } = applyFullMove(
+                board, move.fromIdx, move.toIdx, color, gameState, enPassantSquare
             )
 
             const score = minimax(
@@ -147,7 +149,7 @@ export function minimax(board, depth, alpha, beta, isMaximizing, color, gameStat
                 beta,
                 true,           // next turn is maximizing (white)
                 enemyColor,
-                gameState,
+                newGameState,
                 newEnPassant
             )
 
