@@ -1,16 +1,44 @@
-# React + Vite
+# Chess Arena
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A React/Vite chess application with a local computer opponent and online PvP quick matchmaking.
 
-Currently, two official plugins are available:
+## Run locally
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Install dependencies:
 
-## React Compiler
+```bash
+npm install
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Start the Vite client in one terminal:
 
-## Expanding the ESLint configuration
+```bash
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Start the Socket.IO PvP server in another terminal:
+
+```bash
+npm run server
+```
+
+Open `http://localhost:5173` in two browser tabs or windows. Choose **Play Vs PVP**, enter a different username in each tab, and choose **Quick Match**. The first player waits in the queue; the second player starts the match.
+
+## PvP behavior
+
+- The first matched player receives White and the second receives Black.
+- The server owns the canonical board and validates every move.
+- Castling, en passant, promotion, captures, check, checkmate, and stalemate use the shared chess engine.
+- Promotion opens the existing piece-selection modal.
+- Closing a tab or losing the connection ends the match for the remaining player.
+- Usernames are trimmed and must contain 2 to 20 characters.
+- Play Vs Friend is still a placeholder.
+
+## Commands
+
+```bash
+npm run dev       # Start the Vite client
+npm run server    # Start the Socket.IO server on port 3001
+npm run build     # Build the client
+npm run lint      # Run ESLint
+```
