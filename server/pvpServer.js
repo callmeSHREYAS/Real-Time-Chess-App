@@ -18,6 +18,12 @@ const io = new Server(httpServer, {
 
 const waitingQueue = []
 const playersBySocket = new Map()
+// {
+//     socketId,
+//     name,
+//     matchId,
+//     color
+// }
 const gamesById = new Map()
 
 function makeId(prefix) {
