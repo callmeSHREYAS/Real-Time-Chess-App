@@ -6,6 +6,8 @@ import { DEFAULT_GAME_STATE } from '../src/computer/engine/gameState.js'
 
 const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const NAME_PATTERN = /^.{2,20}$/u
+const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
+const RECONNECT_GRACE_PERIOD_MS = 30_000
 const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
 
 const httpServer = createServer()
@@ -18,11 +20,15 @@ const io = new Server(httpServer, {
 
 const waitingQueue = []
 const playersBySocket = new Map()
+const playersBySession = new Map()
 // {
 //     socketId,
+//     sessionToken,
 //     name,
 //     matchId,
-//     color
+//     color,
+//     disconnectedAt,
+//     disconnectTimer
 // }
 const gamesById = new Map()
 
@@ -48,6 +54,10 @@ function getPlayer(socketId) {
     return playersBySocket.get(socketId) || null
 }
 
+function getPlayerBySession(sessionToken) {
+    return playersBySession.get(sessionToken) || null
+}
+
 function getGameSnapshot(game) {
     return {
         matchId: game.matchId,
@@ -65,6 +75,7 @@ function getGameSnapshot(game) {
 function sendGameState(game) {
     const snapshot = getGameSnapshot(game)
     for (const player of game.players) {
+        if (!player.socketId) continue
         io.to(player.socketId).emit('game-state', {
             ...snapshot,
             yourColor: player.color,
@@ -75,18 +86,44 @@ function sendGameState(game) {
 }
 
 function removeFromQueue(socketId) {
-    const index = waitingQueue.indexOf(socketId)
+    const player = getPlayer(socketId)
+    if (!player) return
+    removeSessionFromQueue(player.sessionToken)
+}
+
+function removeSessionFromQueue(sessionToken) {
+    const index = waitingQueue.indexOf(sessionToken)
     if (index !== -1) waitingQueue.splice(index, 1)
+}
+
+function clearDisconnectTimer(player) {
+    if (player.disconnectTimer) clearTimeout(player.disconnectTimer)
+    player.disconnectTimer = null
+    player.disconnectedAt = null
+}
+
+function updateGamePlayer(game, sessionToken, updates) {
+    const gamePlayer = game.players.find(player => player.sessionToken === sessionToken)
+    if (gamePlayer) Object.assign(gamePlayer, updates)
+    return gamePlayer
+}
+
+function notifyOpponent(game, sessionToken, event, payload) {
+    for (const player of game.players) {
+        if (player.sessionToken !== sessionToken && player.socketId) {
+            io.to(player.socketId).emit(event, payload)
+        }
+    }
 }
 
 function pairPlayers() {
     while (waitingQueue.length >= 2) {
-        const whiteSocketId = waitingQueue.shift()
-        const blackSocketId = waitingQueue.shift()
-        const whitePlayer = getPlayer(whiteSocketId)
-        const blackPlayer = getPlayer(blackSocketId)
+        const whiteSessionToken = waitingQueue.shift()
+        const blackSessionToken = waitingQueue.shift()
+        const whitePlayer = getPlayerBySession(whiteSessionToken)
+        const blackPlayer = getPlayerBySession(blackSessionToken)
 
-        if (!whitePlayer || !blackPlayer) continue
+        if (!whitePlayer?.socketId || !blackPlayer?.socketId) continue
 
         const game = {
             matchId: makeId('match'),
@@ -106,28 +143,43 @@ function pairPlayers() {
         gamesById.set(game.matchId, game)
         whitePlayer.matchId = game.matchId
         whitePlayer.color = Color.White
+        clearDisconnectTimer(whitePlayer)
         blackPlayer.matchId = game.matchId
         blackPlayer.color = Color.Black
+        clearDisconnectTimer(blackPlayer)
         sendGameState(game)
     }
 }
 
-function endGame(game, disconnectedSocketId = null) {
+function endGame(game, disconnectedSessionToken = null) {
     gamesById.delete(game.matchId)
 
     for (const player of game.players) {
-        const playerState = getPlayer(player.socketId)
+        const playerState = getPlayerBySession(player.sessionToken)
         if (playerState) {
+            clearDisconnectTimer(playerState)
             playerState.matchId = null
             playerState.color = null
+            playersBySession.delete(playerState.sessionToken)
+            if (playerState.socketId) playersBySocket.delete(playerState.socketId)
         }
 
-        if (player.socketId !== disconnectedSocketId) {
+        if (player.socketId && player.sessionToken !== disconnectedSessionToken) {
             io.to(player.socketId).emit('match-ended', {
-                reason: disconnectedSocketId ? 'Opponent disconnected' : 'Match ended',
+                reason: disconnectedSessionToken ? 'Opponent disconnected' : 'Match ended',
             })
         }
     }
+}
+
+function scheduleDisconnectExpiry(player, game) {
+    clearDisconnectTimer(player)
+    player.disconnectedAt = Date.now()
+    player.disconnectTimer = setTimeout(() => {
+        if (player.disconnectedAt && Date.now() - player.disconnectedAt >= RECONNECT_GRACE_PERIOD_MS) {
+            endGame(game, player.sessionToken)
+        }
+    }, RECONNECT_GRACE_PERIOD_MS)
 }
 
 function reject(socket, reason) {
@@ -135,17 +187,48 @@ function reject(socket, reason) {
 }
 
 io.on('connection', socket => {
-    socket.on('join-quick-match', rawName => {
-        const player = getPlayer(socket.id)
+    socket.on('join-quick-match', payload => {
+        const rawName = typeof payload === 'string' ? payload : payload?.name
+        const sessionToken = typeof payload === 'string' ? null : payload?.sessionToken
         const name = normalizeName(rawName)
+
+        if (typeof sessionToken !== 'string' || !SESSION_TOKEN_PATTERN.test(sessionToken)) {
+            socket.emit('queue-error', { reason: 'Invalid session token' })
+            return
+        }
+
+        const existingPlayer = getPlayerBySession(sessionToken)
+        const player = getPlayer(socket.id) || existingPlayer
+
+        if (existingPlayer && existingPlayer.socketId && existingPlayer.socketId !== socket.id) {
+            socket.emit('queue-error', { reason: 'This session is already connected' })
+            return
+        }
 
         if (!NAME_PATTERN.test(name)) {
             socket.emit('queue-error', { reason: 'Name must be between 2 and 20 characters' })
             return
         }
 
-        if (!isNameAvailable(name, socket.id)) {
+        if (!isNameAvailable(name, existingPlayer?.socketId || socket.id)) {
             socket.emit('queue-error', { reason: 'That username is already in use' })
+            return
+        }
+
+        if (player?.matchId && player.disconnectedAt) {
+            const game = gamesById.get(player.matchId)
+            if (!game) {
+                socket.emit('queue-error', { reason: 'That match is no longer available' })
+                return
+            }
+
+            clearDisconnectTimer(player)
+            player.socketId = socket.id
+            playersBySocket.set(socket.id, player)
+            updateGamePlayer(game, sessionToken, { socketId: socket.id })
+            socket.emit('reconnected', { matchId: game.matchId })
+            sendGameState(game)
+            notifyOpponent(game, sessionToken, 'player-reconnected', { name: player.name })
             return
         }
 
@@ -154,11 +237,19 @@ io.on('connection', socket => {
             return
         }
 
+        if (player?.sessionToken && player.name !== name) {
+            socket.emit('queue-error', { reason: 'This session belongs to another username' })
+            return
+        }
+
         removeFromQueue(socket.id)
-        const nextPlayer = player || { socketId: socket.id, matchId: null, color: null }
+        const nextPlayer = player || { sessionToken, matchId: null, color: null }
+        nextPlayer.socketId = socket.id
         nextPlayer.name = name
         playersBySocket.set(socket.id, nextPlayer)
-        waitingQueue.push(socket.id)
+        playersBySession.set(sessionToken, nextPlayer)
+        clearDisconnectTimer(nextPlayer)
+        if (!waitingQueue.includes(sessionToken)) waitingQueue.push(sessionToken)
         socket.emit('queue-status', { position: waitingQueue.length })
         pairPlayers()
     })
@@ -166,6 +257,17 @@ io.on('connection', socket => {
     socket.on('leave-queue', () => {
         removeFromQueue(socket.id)
         socket.emit('queue-left')
+    })
+
+    socket.on('leave-match', () => {
+        const player = getPlayer(socket.id)
+        const game = player?.matchId ? gamesById.get(player.matchId) : null
+        if (game) endGame(game)
+        else if (player) {
+            removeSessionFromQueue(player.sessionToken)
+            playersBySession.delete(player.sessionToken)
+            playersBySocket.delete(socket.id)
+        }
     })
 
     socket.on('submit-move', payload => {
@@ -234,7 +336,15 @@ io.on('connection', socket => {
         const player = getPlayer(socket.id)
         if (player?.matchId) {
             const game = gamesById.get(player.matchId)
-            if (game) endGame(game, socket.id)
+            if (game) {
+                player.socketId = null
+                updateGamePlayer(game, player.sessionToken, { socketId: null })
+                scheduleDisconnectExpiry(player, game)
+                notifyOpponent(game, player.sessionToken, 'player-disconnected', {
+                    name: player.name,
+                    gracePeriodSeconds: RECONNECT_GRACE_PERIOD_MS / 1000,
+                })
+            }
         }
         playersBySocket.delete(socket.id)
     })

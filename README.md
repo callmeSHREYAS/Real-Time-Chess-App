@@ -30,7 +30,8 @@ Open `http://localhost:5173` in two browser tabs or windows. Choose **Play Vs PV
 - The server owns the canonical board and validates every move.
 - Castling, en passant, promotion, captures, check, checkmate, and stalemate use the shared chess engine.
 - Promotion opens the existing piece-selection modal.
-- Closing a tab or losing the connection ends the match for the remaining player.
+- Closing a tab or losing the connection gives that player 30 seconds to reconnect and resume the match.
+- Clicking Leave Match intentionally ends the match immediately.
 - Usernames are trimmed and must contain 2 to 20 characters.
 - Play Vs Friend is still a placeholder.
 

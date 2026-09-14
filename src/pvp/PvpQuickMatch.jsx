@@ -6,7 +6,7 @@ import PvpChessBoard from './PvpChessBoard'
 export default function PvpQuickMatch() {
   const navigate = useNavigate()
   const location = useLocation()
-  const name = location.state?.name
+  const name = location.state?.name || sessionStorage.getItem('chess-pvp-name')
   const socketRef = useRef(null)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
@@ -18,12 +18,17 @@ export default function PvpQuickMatch() {
       return undefined
     }
 
+    sessionStorage.setItem('chess-pvp-name', name)
+    const tokenKey = `chess-pvp-token:${name.toLowerCase()}`
+    const sessionToken = sessionStorage.getItem(tokenKey) || crypto.randomUUID().replaceAll('-', '')
+    sessionStorage.setItem(tokenKey, sessionToken)
+
     const socket = io('http://localhost:3001')
     socketRef.current = socket
 
     socket.on('connect', () => {
       setMessage('Looking for an opponent...')
-      socket.emit('join-quick-match', name)
+      socket.emit('join-quick-match', { name, sessionToken })
     })
     socket.on('queue-status', ({ position }) => {
       setMessage(position === 1 ? 'Waiting for an opponent...' : `Waiting in position ${position}...`)
@@ -40,6 +45,14 @@ export default function PvpQuickMatch() {
       setSnapshot(null)
       setMessage(reason)
     })
+    socket.on('player-disconnected', ({ name: disconnectedName, gracePeriodSeconds }) => {
+      setError(`${disconnectedName} disconnected. Waiting ${gracePeriodSeconds}s for reconnection...`)
+      setMessage(`${disconnectedName} disconnected. Waiting ${gracePeriodSeconds}s for reconnection...`)
+    })
+    socket.on('player-reconnected', ({ name: reconnectedName }) => {
+      setError('')
+      setMessage(`${reconnectedName} reconnected.`)
+    })
     socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
 
     return () => {
@@ -54,8 +67,10 @@ export default function PvpQuickMatch() {
   }
 
   function leaveMatch() {
-    socketRef.current?.emit('leave-queue')
+    socketRef.current?.emit('leave-match')
     socketRef.current?.disconnect()
+    sessionStorage.removeItem('chess-pvp-name')
+    if (name) sessionStorage.removeItem(`chess-pvp-token:${name.toLowerCase()}`)
     navigate('/pvp')
   }
 
