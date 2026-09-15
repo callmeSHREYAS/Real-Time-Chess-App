@@ -11,6 +11,7 @@ const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 const RECONNECT_GRACE_PERIOD_MS = 30_000
 const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
 const WAITING_QUEUE_KEY = 'chess:pvp:waiting-queue'
+const GAME_KEY_PREFIX = 'chess:pvp:game:'
 
 const httpServer = createServer()
 const redisClient = createClient({
@@ -36,8 +37,6 @@ const playersBySession = new Map()
 //     disconnectedAt,
 //     disconnectTimer
 // }
-const gamesById = new Map()
-
 function makeId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -62,6 +61,23 @@ function getPlayer(socketId) {
 
 function getPlayerBySession(sessionToken) {
     return playersBySession.get(sessionToken) || null
+}
+
+function getGameKey(matchId) {
+    return `${GAME_KEY_PREFIX}${matchId}`
+}
+
+async function getGame(matchId) {
+    const serializedGame = await redisClient.get(getGameKey(matchId))
+    return serializedGame ? JSON.parse(serializedGame) : null
+}
+
+async function saveGame(game) {
+    await redisClient.set(getGameKey(game.matchId), JSON.stringify(game))
+}
+
+async function deleteGame(matchId) {
+    await redisClient.del(getGameKey(matchId))
 }
 
 function getGameSnapshot(game) {
@@ -155,7 +171,7 @@ async function pairPlayers() {
         console.log("players matched");
         
 
-        gamesById.set(game.matchId, game)
+        await saveGame(game)
         whitePlayer.matchId = game.matchId
         whitePlayer.color = Color.White
         clearDisconnectTimer(whitePlayer)
@@ -166,8 +182,8 @@ async function pairPlayers() {
     }
 }
 
-function endGame(game, disconnectedSessionToken = null) {
-    gamesById.delete(game.matchId)
+async function endGame(game, disconnectedSessionToken = null) {
+    await deleteGame(game.matchId)
 
     for (const player of game.players) {
         const playerState = getPlayerBySession(player.sessionToken)
@@ -190,9 +206,9 @@ function endGame(game, disconnectedSessionToken = null) {
 function scheduleDisconnectExpiry(player, game) {
     clearDisconnectTimer(player)
     player.disconnectedAt = Date.now()
-    player.disconnectTimer = setTimeout(() => {
+    player.disconnectTimer = setTimeout(async () => {
         if (player.disconnectedAt && Date.now() - player.disconnectedAt >= RECONNECT_GRACE_PERIOD_MS) {
-            endGame(game, player.sessionToken)
+            await endGame(game, player.sessionToken)
         }
     }, RECONNECT_GRACE_PERIOD_MS)
 }
@@ -231,7 +247,7 @@ io.on('connection', socket => {
         }
 
         if (player?.matchId && player.disconnectedAt) {
-            const game = gamesById.get(player.matchId)
+            const game = await getGame(player.matchId)
             if (!game) {
                 socket.emit('queue-error', { reason: 'That match is no longer available' })
                 return
@@ -241,6 +257,7 @@ io.on('connection', socket => {
             player.socketId = socket.id
             playersBySocket.set(socket.id, player)
             updateGamePlayer(game, sessionToken, { socketId: socket.id })
+            await saveGame(game)
             socket.emit('reconnected', { matchId: game.matchId })
             sendGameState(game)
             notifyOpponent(game, sessionToken, 'player-reconnected', { name: player.name })
@@ -277,8 +294,8 @@ io.on('connection', socket => {
 
     socket.on('leave-match', async () => {
         const player = getPlayer(socket.id)
-        const game = player?.matchId ? gamesById.get(player.matchId) : null
-        if (game) endGame(game)
+        const game = player?.matchId ? await getGame(player.matchId) : null
+        if (game) await endGame(game)
         else if (player) {
             await removeSessionFromQueue(player.sessionToken)
             playersBySession.delete(player.sessionToken)
@@ -286,9 +303,9 @@ io.on('connection', socket => {
         }
     })
 
-    socket.on('submit-move', payload => {
+    socket.on('submit-move', async payload => {
         const player = getPlayer(socket.id)
-        const game = player?.matchId ? gamesById.get(player.matchId) : null
+        const game = player?.matchId ? await getGame(player.matchId) : null
 
         if (!game) {
             reject(socket, 'You are not in an active match')
@@ -344,6 +361,7 @@ io.on('connection', socket => {
             capturedList.push({ piece: result.capturedPiece })
         }
 
+        await saveGame(game)
         sendGameState(game)
     })
 
@@ -351,10 +369,11 @@ io.on('connection', socket => {
         await removeFromQueue(socket.id)
         const player = getPlayer(socket.id)
         if (player?.matchId) {
-            const game = gamesById.get(player.matchId)
+            const game = await getGame(player.matchId)
             if (game) {
                 player.socketId = null
                 updateGamePlayer(game, player.sessionToken, { socketId: null })
+                await saveGame(game)
                 scheduleDisconnectExpiry(player, game)
                 console.log("player-disconnected");
                 
