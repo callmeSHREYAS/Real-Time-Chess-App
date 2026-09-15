@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { createClient } from 'redis'
 import { Server } from 'socket.io'
 import { applyChessMove } from '../src/computer/engine/applyChessMove.js'
 import { setupStartingPosition, Color, Piece } from '../src/computer/engine/board.js'
@@ -9,8 +10,14 @@ const NAME_PATTERN = /^.{2,20}$/u
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 const RECONNECT_GRACE_PERIOD_MS = 30_000
 const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
+const WAITING_QUEUE_KEY = 'chess:pvp:waiting-queue'
 
 const httpServer = createServer()
+const redisClient = createClient({
+    url: globalThis.process?.env?.REDIS_URL || 'redis://localhost:6379',
+})
+redisClient.on('error', error => console.error('Redis client error', error))
+
 const io = new Server(httpServer, {
     cors: {
         origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
@@ -18,7 +25,6 @@ const io = new Server(httpServer, {
     },
 })
 
-const waitingQueue = []
 const playersBySocket = new Map()
 const playersBySession = new Map()
 // {
@@ -85,15 +91,14 @@ function sendGameState(game) {
     }
 }
 
-function removeFromQueue(socketId) {
+async function removeFromQueue(socketId) {
     const player = getPlayer(socketId)
     if (!player) return
-    removeSessionFromQueue(player.sessionToken)
+    await removeSessionFromQueue(player.sessionToken)
 }
 
-function removeSessionFromQueue(sessionToken) {
-    const index = waitingQueue.indexOf(sessionToken)
-    if (index !== -1) waitingQueue.splice(index, 1)
+async function removeSessionFromQueue(sessionToken) {
+    await redisClient.lRem(WAITING_QUEUE_KEY, 0, sessionToken)
 }
 
 function clearDisconnectTimer(player) {
@@ -116,15 +121,23 @@ function notifyOpponent(game, sessionToken, event, payload) {
     }
 }
 
-function pairPlayers() {
-    while (waitingQueue.length >= 2) {
-        const whiteSessionToken = waitingQueue.shift()
-        const blackSessionToken = waitingQueue.shift()
+async function pairPlayers() {
+    while (true) {
+        const sessions = await redisClient.eval(
+            `local queueLength = redis.call('LLEN', KEYS[1])
+            if queueLength < 2 then
+                return {}
+            end
+            return redis.call('LPOP', KEYS[1], 2)`,
+            { keys: [WAITING_QUEUE_KEY], arguments: [] },
+        )
+        if (!sessions || sessions.length < 2) return
+
+        const [whiteSessionToken, blackSessionToken] = sessions
         const whitePlayer = getPlayerBySession(whiteSessionToken)
         const blackPlayer = getPlayerBySession(blackSessionToken)
 
         if (!whitePlayer?.socketId || !blackPlayer?.socketId) continue
-
         const game = {
             matchId: makeId('match'),
             board: setupStartingPosition(),
@@ -139,6 +152,8 @@ function pairPlayers() {
                 { ...blackPlayer, color: Color.Black },
             ],
         }
+        console.log("players matched");
+        
 
         gamesById.set(game.matchId, game)
         whitePlayer.matchId = game.matchId
@@ -187,7 +202,7 @@ function reject(socket, reason) {
 }
 
 io.on('connection', socket => {
-    socket.on('join-quick-match', payload => {
+    socket.on('join-quick-match', async payload => {
         const rawName = typeof payload === 'string' ? payload : payload?.name
         const sessionToken = typeof payload === 'string' ? null : payload?.sessionToken
         const name = normalizeName(rawName)
@@ -242,29 +257,30 @@ io.on('connection', socket => {
             return
         }
 
-        removeFromQueue(socket.id)
+        await removeFromQueue(socket.id)
         const nextPlayer = player || { sessionToken, matchId: null, color: null }
         nextPlayer.socketId = socket.id
         nextPlayer.name = name
         playersBySocket.set(socket.id, nextPlayer)
         playersBySession.set(sessionToken, nextPlayer)
         clearDisconnectTimer(nextPlayer)
-        if (!waitingQueue.includes(sessionToken)) waitingQueue.push(sessionToken)
-        socket.emit('queue-status', { position: waitingQueue.length })
-        pairPlayers()
+        console.log('player pushed in waiting queue');
+        await redisClient.rPush(WAITING_QUEUE_KEY, sessionToken)
+        socket.emit('queue-status', { position: await redisClient.lLen(WAITING_QUEUE_KEY) })
+        await pairPlayers()
     })
 
-    socket.on('leave-queue', () => {
-        removeFromQueue(socket.id)
+    socket.on('leave-queue', async () => {
+        await removeFromQueue(socket.id)
         socket.emit('queue-left')
     })
 
-    socket.on('leave-match', () => {
+    socket.on('leave-match', async () => {
         const player = getPlayer(socket.id)
         const game = player?.matchId ? gamesById.get(player.matchId) : null
         if (game) endGame(game)
         else if (player) {
-            removeSessionFromQueue(player.sessionToken)
+            await removeSessionFromQueue(player.sessionToken)
             playersBySession.delete(player.sessionToken)
             playersBySocket.delete(socket.id)
         }
@@ -331,8 +347,8 @@ io.on('connection', socket => {
         sendGameState(game)
     })
 
-    socket.on('disconnect', () => {
-        removeFromQueue(socket.id)
+    socket.on('disconnect', async () => {
+        await removeFromQueue(socket.id)
         const player = getPlayer(socket.id)
         if (player?.matchId) {
             const game = gamesById.get(player.matchId)
@@ -340,6 +356,8 @@ io.on('connection', socket => {
                 player.socketId = null
                 updateGamePlayer(game, player.sessionToken, { socketId: null })
                 scheduleDisconnectExpiry(player, game)
+                console.log("player-disconnected");
+                
                 notifyOpponent(game, player.sessionToken, 'player-disconnected', {
                     name: player.name,
                     gracePeriodSeconds: RECONNECT_GRACE_PERIOD_MS / 1000,
@@ -350,6 +368,7 @@ io.on('connection', socket => {
     })
 })
 
+await redisClient.connect()
 httpServer.listen(PORT, () => {
     console.log(`PvP server listening on http://localhost:${PORT}`)
 })

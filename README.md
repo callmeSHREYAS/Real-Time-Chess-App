@@ -22,6 +22,12 @@ Start the Socket.IO PvP server in another terminal:
 npm run server
 ```
 
+Or start the PvP server and Redis together with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
 Open `http://localhost:5173` in two browser tabs or windows. Choose **Play Vs PVP**, enter a different username in each tab, and choose **Quick Match**. The first player waits in the queue; the second player starts the match.
 
 ## PvP behavior
