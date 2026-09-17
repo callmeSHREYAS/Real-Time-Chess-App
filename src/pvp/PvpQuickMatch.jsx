@@ -6,7 +6,7 @@ import PvpChessBoard from './PvpChessBoard'
 export default function PvpQuickMatch() {
   const navigate = useNavigate()
   const location = useLocation()
-  const name = location.state?.name || sessionStorage.getItem('chess-pvp-name')
+  const name = location.state?.name || localStorage.getItem('chess-pvp-name')
   const socketRef = useRef(null)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
@@ -18,10 +18,10 @@ export default function PvpQuickMatch() {
       return undefined
     }
 
-    sessionStorage.setItem('chess-pvp-name', name)
+    localStorage.setItem('chess-pvp-name', name)
     const tokenKey = `chess-pvp-token:${name.toLowerCase()}`
-    const sessionToken = sessionStorage.getItem(tokenKey) || crypto.randomUUID().replaceAll('-', '')
-    sessionStorage.setItem(tokenKey, sessionToken)
+    const sessionToken = localStorage.getItem(tokenKey) || crypto.randomUUID().replaceAll('-', '')
+    localStorage.setItem(tokenKey, sessionToken)
 
     const socket = io('http://localhost:3001')
     socketRef.current = socket
@@ -69,8 +69,8 @@ export default function PvpQuickMatch() {
   function leaveMatch() {
     socketRef.current?.emit('leave-match')
     socketRef.current?.disconnect()
-    sessionStorage.removeItem('chess-pvp-name')
-    if (name) sessionStorage.removeItem(`chess-pvp-token:${name.toLowerCase()}`)
+    localStorage.removeItem('chess-pvp-name')
+    if (name) localStorage.removeItem(`chess-pvp-token:${name.toLowerCase()}`)
     navigate('/pvp')
   }
 

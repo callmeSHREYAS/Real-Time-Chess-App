@@ -206,9 +206,24 @@ async function endGame(game, disconnectedSessionToken = null) {
 function scheduleDisconnectExpiry(player, game) {
     clearDisconnectTimer(player)
     player.disconnectedAt = Date.now()
+    const sessionToken = player.sessionToken
+    const matchId = game.matchId
     player.disconnectTimer = setTimeout(async () => {
-        if (player.disconnectedAt && Date.now() - player.disconnectedAt >= RECONNECT_GRACE_PERIOD_MS) {
-            await endGame(game, player.sessionToken)
+        try {
+            const currentPlayer = getPlayerBySession(sessionToken)
+            const currentGame = await getGame(matchId)
+            const currentGamePlayer = currentGame?.players.find(item => item.sessionToken === sessionToken)
+
+            if (
+                currentPlayer?.disconnectedAt &&
+                currentGamePlayer?.socketId === null &&
+                currentGamePlayer.disconnectedAt &&
+                Date.now() - currentPlayer.disconnectedAt >= RECONNECT_GRACE_PERIOD_MS
+            ) {
+                await endGame(currentGame, sessionToken)
+            }
+        } catch (error) {
+            console.error('Failed to expire disconnected game', error)
         }
     }, RECONNECT_GRACE_PERIOD_MS)
 }
@@ -372,7 +387,10 @@ io.on('connection', socket => {
             const game = await getGame(player.matchId)
             if (game) {
                 player.socketId = null
-                updateGamePlayer(game, player.sessionToken, { socketId: null })
+                updateGamePlayer(game, player.sessionToken, {
+                    socketId: null,
+                    disconnectedAt: player.disconnectedAt,
+                })
                 await saveGame(game)
                 scheduleDisconnectExpiry(player, game)
                 console.log("player-disconnected");
