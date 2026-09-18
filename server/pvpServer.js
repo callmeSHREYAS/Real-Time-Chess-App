@@ -9,6 +9,9 @@ const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const NAME_PATTERN = /^.{2,20}$/u
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 const RECONNECT_GRACE_PERIOD_MS = 30_000
+const RATE_LIMIT_KEY_PREFIX = 'chess:pvp:rate-limit:'
+const JOIN_RATE_LIMIT = { maxRequests: 5, windowSeconds: 10 }
+const MOVE_RATE_LIMIT = { maxRequests: 30, windowSeconds: 10 }
 const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
 const WAITING_QUEUE_KEY = 'chess:pvp:waiting-queue'
 const GAME_KEY_PREFIX = 'chess:pvp:game:'
@@ -78,6 +81,13 @@ async function saveGame(game) {
 
 async function deleteGame(matchId) {
     await redisClient.del(getGameKey(matchId))
+}
+
+async function isRateLimited(socketId, action, { maxRequests, windowSeconds }) {
+    const key = `${RATE_LIMIT_KEY_PREFIX}${action}:${socketId}`
+    const requestCount = await redisClient.incr(key)
+    if (requestCount === 1) await redisClient.expire(key, windowSeconds)
+    return requestCount > maxRequests
 }
 
 function getGameSnapshot(game) {
@@ -234,6 +244,12 @@ function reject(socket, reason) {
 
 io.on('connection', socket => {
     socket.on('join-quick-match', async payload => {
+        const joinRateLimitIdentity = socket.handshake.address || socket.id
+        if (await isRateLimited(joinRateLimitIdentity, 'join', JOIN_RATE_LIMIT)) {
+            socket.emit('queue-error', { reason: 'Too many matchmaking requests. Try again shortly.' })
+            return
+        }
+
         const rawName = typeof payload === 'string' ? payload : payload?.name
         const sessionToken = typeof payload === 'string' ? null : payload?.sessionToken
         const name = normalizeName(rawName)
@@ -319,6 +335,11 @@ io.on('connection', socket => {
     })
 
     socket.on('submit-move', async payload => {
+        if (await isRateLimited(socket.id, 'move', MOVE_RATE_LIMIT)) {
+            reject(socket, 'Too many move requests. Try again shortly.')
+            return
+        }
+
         const player = getPlayer(socket.id)
         const game = player?.matchId ? await getGame(player.matchId) : null
 
