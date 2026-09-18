@@ -387,12 +387,12 @@ io.on('connection', socket => {
             const game = await getGame(player.matchId)
             if (game) {
                 player.socketId = null
+                scheduleDisconnectExpiry(player, game)
                 updateGamePlayer(game, player.sessionToken, {
                     socketId: null,
                     disconnectedAt: player.disconnectedAt,
                 })
                 await saveGame(game)
-                scheduleDisconnectExpiry(player, game)
                 console.log("player-disconnected");
                 
                 notifyOpponent(game, player.sessionToken, 'player-disconnected', {
