@@ -176,7 +176,7 @@ async function rejoinActiveMatch(socket, livePlayer, sessionToken) {
     await clearDisconnectTimer(livePlayer)
     livePlayer.socketId = socket.id
     await rememberSocketForPlayer(socket.id, livePlayer)
-    updateGamePlayer(game, sessionToken, { socketId: socket.id })
+    updateGamePlayer(game, sessionToken, { socketId: socket.id, disconnectedAt: null })
     await saveGame(game)
     socket.emit('reconnected', { matchId: game.matchId })
     sendGameState(game)
