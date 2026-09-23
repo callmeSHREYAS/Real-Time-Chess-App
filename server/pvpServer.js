@@ -1,11 +1,12 @@
 // Design overview
 //
 // Redis is the process-shared, durable source of truth: it holds game
-// records, the matchmaking waiting queue, and rate-limit counters. This
+// records, the matchmaking waiting queue, rate-limit counters, and the
+// live player records (keyed by socket id and by session token). This
 // process's memory holds only what is inherently per-process and
-// temporary: the socket connection and a live player object per attached
-// socket/session. A stored game record only ever contains COPIES of
-// players, so touching a live player never changes a record and vice versa.
+// temporary: the socket connection and the reconnect-grace timers. A
+// stored game record only ever contains COPIES of players, so touching a
+// live player never changes a record and vice versa.
 import { createServer } from 'node:http'
 import { Server } from 'socket.io'
 import { applyChessMove } from '../src/computer/engine/applyChessMove.js'
@@ -154,8 +155,8 @@ function rejectInvalidName(socket, name) {
     return true
 }
 
-function rejectNameUnavailable(socket, name, socketId) {
-    if (isNameAvailable(name, socketId)) return false
+async function rejectNameUnavailable(socket, name, socketId) {
+    if (await isNameAvailable(name, socketId)) return false
     socket.emit('queue-error', { reason: 'That username is already in use' })
     return true
 }
@@ -172,9 +173,9 @@ async function rejoinActiveMatch(socket, livePlayer, sessionToken) {
         return true
     }
 
-    clearDisconnectTimer(livePlayer)
+    await clearDisconnectTimer(livePlayer)
     livePlayer.socketId = socket.id
-    rememberSocketForPlayer(socket.id, livePlayer)
+    await rememberSocketForPlayer(socket.id, livePlayer)
     updateGamePlayer(game, sessionToken, { socketId: socket.id })
     await saveGame(game)
     socket.emit('reconnected', { matchId: game.matchId })
@@ -196,16 +197,17 @@ function rejectSessionBoundToAnotherName(socket, livePlayer, name) {
 }
 
 // Fresh join path: drop any older queue entry for this socket, (re)register
-// the live player in the maps, push the session onto the waiting list, tell
-// the client where they sit, then attempt to make a match.
+// the live player in Redis (by socket and by session), push the session
+// onto the waiting list, tell the client where they sit, then attempt to
+// make a match.
 async function joinWaitingQueue(socket, sessionToken, name, livePlayer) {
     await removePlayerFromQueue(socket.id)
     const queuedPlayer = livePlayer || makeNewPlayer(sessionToken)
     queuedPlayer.socketId = socket.id
     queuedPlayer.name = name
-    rememberSocketForPlayer(socket.id, queuedPlayer)
-    rememberSessionForPlayer(sessionToken, queuedPlayer)
-    clearDisconnectTimer(queuedPlayer)
+    await rememberSocketForPlayer(socket.id, queuedPlayer)
+    await rememberSessionForPlayer(sessionToken, queuedPlayer)
+    await clearDisconnectTimer(queuedPlayer)
     console.log('player pushed in waiting queue');
     await enqueueForMatchmaking(sessionToken)
     socket.emit('queue-status', { position: await waitingQueueLength() })
@@ -222,8 +224,8 @@ async function abandonMatch(livePlayer, socketId) {
     }
     if (livePlayer) {
         await removeSessionFromQueue(livePlayer.sessionToken)
-        forgetSession(livePlayer.sessionToken)
-        forgetSocket(socketId)
+        await forgetSession(livePlayer.sessionToken)
+        await forgetSocket(socketId)
     }
 }
 
@@ -311,7 +313,7 @@ async function handlePlayerDisconnect(livePlayer) {
     const game = await getGame(livePlayer.matchId)
     if (!game) return
     livePlayer.socketId = null
-    scheduleDisconnectExpiry(livePlayer, game)
+    await scheduleDisconnectExpiry(livePlayer, game)
     updateGamePlayer(game, livePlayer.sessionToken, { socketId: null, disconnectedAt: livePlayer.disconnectedAt })
     await saveGame(game)
     console.log("player-disconnected");
@@ -330,12 +332,12 @@ io.on('connection', socket => {
         const { name, sessionToken } = parseJoinPayload(payload)
         if (rejectInvalidSessionToken(socket, sessionToken)) return
 
-        const existingPlayer = getLivePlayerBySession(sessionToken)
-        const livePlayer = getLivePlayer(socket.id) || existingPlayer
+        const existingPlayer = await getLivePlayerBySession(sessionToken)
+        const livePlayer = (await getLivePlayer(socket.id)) || existingPlayer
 
         if (rejectSessionAlreadyConnected(socket, existingPlayer)) return
         if (rejectInvalidName(socket, name)) return
-        if (rejectNameUnavailable(socket, name, existingPlayer?.socketId || socket.id)) return
+        if (await rejectNameUnavailable(socket, name, existingPlayer?.socketId || socket.id)) return
         if (await rejoinActiveMatch(socket, livePlayer, sessionToken)) return
         if (rejectAlreadyInMatch(socket, livePlayer)) return
         if (rejectSessionBoundToAnotherName(socket, livePlayer, name)) return
@@ -349,13 +351,13 @@ io.on('connection', socket => {
     })
 
     socket.on('leave-match', async () => {
-        await abandonMatch(getLivePlayer(socket.id), socket.id)
+        await abandonMatch(await getLivePlayer(socket.id), socket.id)
     })
 
     socket.on('submit-move', async payload => {
         if (await rejectIfMoveRateLimited(socket)) return
 
-        const livePlayer = getLivePlayer(socket.id)
+        const livePlayer = await getLivePlayer(socket.id)
         const game = livePlayer?.matchId ? await getGame(livePlayer.matchId) : null
 
         if (rejectNoActiveMatch(socket, game)) return
@@ -371,8 +373,8 @@ io.on('connection', socket => {
 
     socket.on('disconnect', async () => {
         await removePlayerFromQueue(socket.id)
-        await handlePlayerDisconnect(getLivePlayer(socket.id))
-        forgetSocket(socket.id)
+        await handlePlayerDisconnect(await getLivePlayer(socket.id))
+        await forgetSocket(socket.id)
     })
 })
 

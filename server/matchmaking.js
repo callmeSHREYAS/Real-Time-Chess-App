@@ -15,7 +15,7 @@ export async function removeSessionFromQueue(sessionToken) {
 }
 
 export async function removePlayerFromQueue(socketId) {
-    const livePlayer = getLivePlayer(socketId)
+    const livePlayer = await getLivePlayer(socketId)
     if (!livePlayer) return
     await removeSessionFromQueue(livePlayer.sessionToken)
 }
@@ -48,8 +48,8 @@ export async function pairPlayers() {
         if (!sessions || sessions.length < 2) return
 
         const [whiteSessionToken, blackSessionToken] = sessions
-        const whiteLivePlayer = getLivePlayerBySession(whiteSessionToken)
-        const blackLivePlayer = getLivePlayerBySession(blackSessionToken)
+        const whiteLivePlayer = await getLivePlayerBySession(whiteSessionToken)
+        const blackLivePlayer = await getLivePlayerBySession(blackSessionToken)
 
         // A popped token can point at a player who is no longer online on
         // this process (e.g. they disconnected right after queuing). Skip
@@ -77,10 +77,10 @@ export async function pairPlayers() {
         await saveGame(game)
         whiteLivePlayer.matchId = game.matchId
         whiteLivePlayer.color = Color.White
-        clearDisconnectTimer(whiteLivePlayer)
+        await clearDisconnectTimer(whiteLivePlayer)
         blackLivePlayer.matchId = game.matchId
         blackLivePlayer.color = Color.Black
-        clearDisconnectTimer(blackLivePlayer)
+        await clearDisconnectTimer(blackLivePlayer)
         sendGameState(game)
     }
 }
