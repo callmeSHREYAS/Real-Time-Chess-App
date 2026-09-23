@@ -60,15 +60,16 @@ export function normalizeName(name) {
 // (their socket key is deleted), even while their reconnect grace period
 // is still ticking, exactly as the old socket map behaved.
 export async function isNameAvailable(name, socketId) {
-    for await (const key of redisClient.scanIterator({ MATCH: `${PLAYER_SOCKET_KEY_PREFIX}*`, COUNT: 100 })) {
-        const serialized = await redisClient.get(key)
-        if (!serialized) continue
-        const candidate = JSON.parse(serialized)
-        if (candidate.socketId !== socketId && candidate.name.toLowerCase() === name.toLowerCase()) {
-            return false
+    for await (const keys of redisClient.scanIterator({ MATCH: `${PLAYER_SOCKET_KEY_PREFIX}*`, COUNT: 100 })) {
+        for (const key of keys) {
+            const serialized = await redisClient.get(key)
+            if (!serialized) continue
+            const candidate = JSON.parse(serialized)
+            if (candidate.socketId !== socketId && candidate.name.toLowerCase() === name.toLowerCase()) {
+                return false
+            }
         }
     }
-
     return true
 }
 
