@@ -254,6 +254,8 @@ io.on('connection', socket => {
             const game = await getGame(player.matchId)
             if (game) await endGame(game, socket.id)
         }
+        console.log(player.name);
+        
         await Promise.all([
             removePlayer(socket.id),
             removeSocketPlayer(socket.id),
