@@ -5,16 +5,20 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "server": "node server/pvpServer.js",
-    "dev:server": "node server/pvpServer.js",
+    "server": "node PVPServices/pvpServer/pvpServer.js",
+    "dev:server": "node PVPServices/pvpServer/pvpServer.js",
+    "services:up": "docker compose up -d",
+    "services:down": "docker compose down",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "pg": "^8.23.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-router-dom": "^7.18.0",
+    "redis": "^6.2.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   },

@@ -1,12 +1,35 @@
 import { createServer } from 'node:http'
 import { Server } from 'socket.io'
-import { applyChessMove } from '../src/computer/engine/applyChessMove.js'
-import { setupStartingPosition, Color, Piece } from '../src/computer/engine/board.js'
-import { DEFAULT_GAME_STATE } from '../src/computer/engine/gameState.js'
+import { applyChessMove } from '../../src/computer/engine/applyChessMove.js'
+import { setupStartingPosition, Color, Piece } from '../../src/computer/engine/board.js'
+import { DEFAULT_GAME_STATE } from '../../src/computer/engine/gameState.js'
+import {
+    clearSocketPlayers,
+    closeDatabase,
+    initializeDatabase,
+    registerSocketPlayer,
+    removeSocketPlayer,
+    removeUser,
+} from '../Models/database.js'
+import {
+    closeRedis,
+    enqueuePlayer,
+    getGame,
+    getPlayer,
+    getQueueLength,
+    initializeRedis,
+    removeGame,
+    removePlayer,
+    removeQueuedPlayer,
+    setGame,
+    setPlayer,
+    takeQueuedPair,
+} from '../Models/redis.js'
 
 const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const NAME_PATTERN = /^.{2,20}$/u
 const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
+let socketEventQueue = Promise.resolve()
 
 const httpServer = createServer()
 const io = new Server(httpServer, {
@@ -16,30 +39,12 @@ const io = new Server(httpServer, {
     },
 })
 
-const waitingQueue = []
-const playersBySocket = new Map()
-const gamesById = new Map()
-
 function makeId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 function normalizeName(name) {
     return typeof name === 'string' ? name.trim() : ''
-}
-
-function isNameAvailable(name, socketId) {
-    for (const player of playersBySocket.values()) {
-        if (player.socketId !== socketId && player.name.toLowerCase() === name.toLowerCase()) {
-            return false
-        }
-    }
-
-    return true
-}
-
-function getPlayer(socketId) {
-    return playersBySocket.get(socketId) || null
 }
 
 function getGameSnapshot(game) {
@@ -68,18 +73,16 @@ function sendGameState(game) {
     }
 }
 
-function removeFromQueue(socketId) {
-    const index = waitingQueue.indexOf(socketId)
-    if (index !== -1) waitingQueue.splice(index, 1)
-}
+async function pairPlayers() {
+    while (true) {
+        const pair = await takeQueuedPair()
+        if (!pair || pair.length < 2) return
 
-function pairPlayers() {
-    while (waitingQueue.length >= 2) {
-        const whiteSocketId = waitingQueue.shift()
-        const blackSocketId = waitingQueue.shift()
-        const whitePlayer = getPlayer(whiteSocketId)
-        const blackPlayer = getPlayer(blackSocketId)
-
+        const [whiteSocketId, blackSocketId] = pair
+        const [whitePlayer, blackPlayer] = await Promise.all([
+            getPlayer(whiteSocketId),
+            getPlayer(blackSocketId),
+        ])
         if (!whitePlayer || !blackPlayer) continue
 
         const game = {
@@ -97,23 +100,29 @@ function pairPlayers() {
             ],
         }
 
-        gamesById.set(game.matchId, game)
         whitePlayer.matchId = game.matchId
         whitePlayer.color = Color.White
         blackPlayer.matchId = game.matchId
         blackPlayer.color = Color.Black
+        await Promise.all([
+            setGame(game),
+            setPlayer(whitePlayer),
+            setPlayer(blackPlayer),
+        ])
         sendGameState(game)
     }
 }
 
-function endGame(game, disconnectedSocketId = null) {
-    gamesById.delete(game.matchId)
+async function endGame(game, disconnectedSocketId = null) {
+    await removeGame(game.matchId)
 
+    //todo remove players from PLAYERS_KEY
     for (const player of game.players) {
-        const playerState = getPlayer(player.socketId)
+        const playerState = await getPlayer(player.socketId)
         if (playerState) {
             playerState.matchId = null
             playerState.color = null
+            await setPlayer(playerState)
         }
 
         if (player.socketId !== disconnectedSocketId) {
@@ -128,9 +137,14 @@ function reject(socket, reason) {
     socket.emit('move-rejected', { reason })
 }
 
+function queueSocketEvent(operation) {
+    socketEventQueue = socketEventQueue
+        .then(operation)
+        .catch(error => console.error('PvP socket event failed:', error))
+}
+
 io.on('connection', socket => {
-    socket.on('join-quick-match', rawName => {
-        const player = getPlayer(socket.id)
+    socket.on('join-quick-match', rawName => queueSocketEvent(async () => {
         const name = normalizeName(rawName)
 
         if (!NAME_PATTERN.test(name)) {
@@ -138,33 +152,42 @@ io.on('connection', socket => {
             return
         }
 
-        if (!isNameAvailable(name, socket.id)) {
-            socket.emit('queue-error', { reason: 'That username is already in use' })
-            return
+        try {
+            const player = await getPlayer(socket.id)
+            if (player?.matchId) {
+                socket.emit('queue-error', { reason: 'You are already in a match' })
+                return
+            }
+
+            const registeredName = await registerSocketPlayer(socket.id, name)
+            await removeQueuedPlayer(socket.id)
+            await setPlayer({
+                socketId: socket.id,
+                name: registeredName,
+                matchId: null,
+                color: null,
+            })
+            await enqueuePlayer(socket.id)
+            socket.emit('queue-status', { position: await getQueueLength() })
+            await pairPlayers()
+        } catch (error) {
+            if (error.code === 'USERNAME_IN_USE') {
+                socket.emit('queue-error', { reason: 'That username is already in use' })
+                return
+            }
+            console.error('Could not join quick match:', error)
+            socket.emit('queue-error', { reason: 'Matchmaking is temporarily unavailable' })
         }
+    }))
 
-        if (player?.matchId) {
-            socket.emit('queue-error', { reason: 'You are already in a match' })
-            return
-        }
-
-        removeFromQueue(socket.id)
-        const nextPlayer = player || { socketId: socket.id, matchId: null, color: null }
-        nextPlayer.name = name
-        playersBySocket.set(socket.id, nextPlayer)
-        waitingQueue.push(socket.id)
-        socket.emit('queue-status', { position: waitingQueue.length })
-        pairPlayers()
-    })
-
-    socket.on('leave-queue', () => {
-        removeFromQueue(socket.id)
+    socket.on('leave-queue', () => queueSocketEvent(async () => {
+        await removeQueuedPlayer(socket.id)
         socket.emit('queue-left')
-    })
+    }))
 
-    socket.on('submit-move', payload => {
-        const player = getPlayer(socket.id)
-        const game = player?.matchId ? gamesById.get(player.matchId) : null
+    socket.on('submit-move', payload => queueSocketEvent(async () => {
+        const player = await getPlayer(socket.id)
+        const game = player?.matchId ? await getGame(player.matchId) : null
 
         if (!game) {
             reject(socket, 'You are not in an active match')
@@ -214,26 +237,45 @@ io.on('connection', socket => {
         game.gameStatus = result.gameStatus
 
         if (result.capturedPiece) {
-            const capturedList = result.capturedPiece & 0b11000 === Color.White
+            const capturedList = (result.capturedPiece & 0b11000) === Color.White
                 ? game.capturedWhite
                 : game.capturedBlack
             capturedList.push({ piece: result.capturedPiece })
         }
 
+        await setGame(game)
         sendGameState(game)
-    })
+    }))
 
-    socket.on('disconnect', () => {
-        removeFromQueue(socket.id)
-        const player = getPlayer(socket.id)
+    socket.on('disconnect', () => queueSocketEvent(async () => {
+        await removeQueuedPlayer(socket.id)
+        const player = await getPlayer(socket.id)
         if (player?.matchId) {
-            const game = gamesById.get(player.matchId)
-            if (game) endGame(game, socket.id)
+            const game = await getGame(player.matchId)
+            if (game) await endGame(game, socket.id)
         }
-        playersBySocket.delete(socket.id)
-    })
+        await Promise.all([
+            removePlayer(socket.id),
+            removeSocketPlayer(socket.id),
+            removeUser(player.name)
+        ])
+    }))
 })
+
+await initializeDatabase()
+await clearSocketPlayers()
+await initializeRedis()
 
 httpServer.listen(PORT, () => {
     console.log(`PvP server listening on http://localhost:${PORT}`)
 })
+
+async function shutdown() {
+    io.close(async () => {
+        await Promise.all([closeDatabase(), closeRedis()])
+        globalThis.process?.exit(0)
+    })
+}
+
+globalThis.process?.on('SIGINT', shutdown)
+globalThis.process?.on('SIGTERM', shutdown)

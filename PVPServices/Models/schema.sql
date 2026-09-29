@@ -1,0 +1,13 @@
+CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TABLE IF NOT EXISTS users (
+    u_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    u_name CITEXT NOT NULL CONSTRAINT users_u_name_unique UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS players_by_socket (
+    socket_id TEXT PRIMARY KEY,
+    u_name CITEXT NOT NULL REFERENCES users (u_name) ON UPDATE CASCADE ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT players_by_socket_u_name_unique UNIQUE (u_name)
+);
