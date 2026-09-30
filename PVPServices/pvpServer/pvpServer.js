@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { Server } from 'socket.io'
 import { applyChessMove } from '../../src/computer/engine/applyChessMove.js'
 import { setupStartingPosition, Color, Piece } from '../../src/computer/engine/board.js'
@@ -84,6 +85,11 @@ async function pairPlayers() {
             getPlayer(blackSocketId),
         ])
         if (!whitePlayer || !blackPlayer) continue
+
+        whitePlayer.sessionToken = randomUUID()
+        whitePlayer.disconnectedAt = null
+        blackPlayer.sessionToken = randomUUID()
+        blackPlayer.disconnectedAt = null
 
         const game = {
             matchId: makeId('match'),

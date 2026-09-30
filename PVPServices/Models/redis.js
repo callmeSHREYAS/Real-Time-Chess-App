@@ -2,6 +2,7 @@ import { createClient } from 'redis'
 
 const QUEUE_KEY = 'pvp:queue'
 const PLAYERS_KEY = 'pvp:players'
+const SESSION_PLAYERS_KEY = 'pvp:players-by-session-token'
 const GAMES_KEY = 'pvp:games'
 
 export const redis = createClient({
@@ -12,7 +13,7 @@ redis.on('error', error => console.error('Redis client error:', error))
 
 export async function initializeRedis() {
     await redis.connect()
-    await redis.del(QUEUE_KEY, PLAYERS_KEY, GAMES_KEY)
+    await redis.del(QUEUE_KEY, PLAYERS_KEY, SESSION_PLAYERS_KEY, GAMES_KEY)
 }
 
 export async function enqueuePlayer(socketId) {
@@ -41,12 +42,33 @@ export async function getPlayer(socketId) {
     return player ? JSON.parse(player) : null
 }
 
+export async function getPlayerBySessionToken(sessionToken) {
+    const player = await redis.hGet(SESSION_PLAYERS_KEY, sessionToken)
+    return player ? JSON.parse(player) : null
+}
+
 export async function setPlayer(player) {
+    const previousPlayer = await getPlayer(player.socketId)
+    if (
+        previousPlayer?.sessionToken
+        && previousPlayer.sessionToken !== player.sessionToken
+    ) {
+        await redis.hDel(SESSION_PLAYERS_KEY, previousPlayer.sessionToken)
+    }
+
     await redis.hSet(PLAYERS_KEY, player.socketId, JSON.stringify(player))
+    if (player.sessionToken) {
+        await redis.hSet(SESSION_PLAYERS_KEY, player.sessionToken, JSON.stringify(player))
+    }
 }
 
 export async function removePlayer(socketId) {
-    await redis.hDel(PLAYERS_KEY, socketId)
+    const player = await getPlayer(socketId)
+    const removals = [redis.hDel(PLAYERS_KEY, socketId)]
+    if (player?.sessionToken) {
+        removals.push(redis.hDel(SESSION_PLAYERS_KEY, player.sessionToken))
+    }
+    await Promise.all(removals)
 }
 
 export async function getGame(matchId) {
