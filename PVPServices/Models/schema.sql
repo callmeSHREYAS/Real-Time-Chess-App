@@ -11,3 +11,12 @@ CREATE TABLE IF NOT EXISTS players_by_socket (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT players_by_socket_u_name_unique UNIQUE (u_name)
 );
+
+CREATE TABLE IF NOT EXISTS "disconnectedUsers" (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    u_name CITEXT NOT NULL REFERENCES users (u_name) ON UPDATE CASCADE ON DELETE CASCADE,
+    "sessionToken" TEXT NOT NULL UNIQUE
+);
+
+CREATE INDEX IF NOT EXISTS disconnected_users_u_name_idx
+    ON "disconnectedUsers" (u_name);
