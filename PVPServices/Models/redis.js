@@ -39,12 +39,12 @@ export async function takeQueuedPair() {
 
 export async function getPlayer(socketId) {
     const player = await redis.hGet(PLAYERS_KEY, socketId)
-    return player ? JSON.parse(player) : null
+    return player ? deserializePlayer(player) : null
 }
 
 export async function getPlayerBySessionToken(sessionToken) {
     const player = await redis.hGet(SESSION_PLAYERS_KEY, sessionToken)
-    return player ? JSON.parse(player) : null
+    return player ? deserializePlayer(player) : null
 }
 
 export async function setPlayer(player) {
@@ -56,19 +56,38 @@ export async function setPlayer(player) {
         await redis.hDel(SESSION_PLAYERS_KEY, previousPlayer.sessionToken)
     }
 
-    await redis.hSet(PLAYERS_KEY, player.socketId, JSON.stringify(player))
+    const serializedPlayer = serializePlayer(player)
+    await redis.hSet(PLAYERS_KEY, player.socketId, serializedPlayer)
     if (player.sessionToken) {
-        await redis.hSet(SESSION_PLAYERS_KEY, player.sessionToken, JSON.stringify(player))
+        await redis.hSet(SESSION_PLAYERS_KEY, player.sessionToken, serializedPlayer)
     }
 }
 
-export async function removePlayer(socketId) {
+export async function removePlayer(socketId, { preserveSessionToken = false } = {}) {
     const player = await getPlayer(socketId)
     const removals = [redis.hDel(PLAYERS_KEY, socketId)]
-    if (player?.sessionToken) {
+    if (player?.sessionToken && !preserveSessionToken) {
         removals.push(redis.hDel(SESSION_PLAYERS_KEY, player.sessionToken))
     }
     await Promise.all(removals)
+}
+
+export async function removePlayerBySessionToken(sessionToken) {
+    const player = await getPlayerBySessionToken(sessionToken)
+    const removals = [redis.hDel(SESSION_PLAYERS_KEY, sessionToken)]
+    if (player?.socketId) {
+        removals.push(redis.hDel(PLAYERS_KEY, player.socketId))
+    }
+    await Promise.all(removals)
+}
+
+function serializePlayer({ socketId, ...player }) {
+    return JSON.stringify({ ...player, socket_id: socketId })
+}
+
+function deserializePlayer(serializedPlayer) {
+    const { socket_id: socketId, ...player } = JSON.parse(serializedPlayer)
+    return { ...player, socketId: socketId ?? player.socketId }
 }
 
 export async function getGame(matchId) {

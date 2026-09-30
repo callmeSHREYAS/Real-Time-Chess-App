@@ -3,10 +3,15 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { io } from 'socket.io-client'
 import PvpChessBoard from './PvpChessBoard'
 
+function getSessionTokenStorageKey(name) {
+  return `pvp-session-token:${encodeURIComponent(name.toLowerCase())}`
+}
+
 export default function PvpQuickMatch() {
   const navigate = useNavigate()
   const location = useLocation()
   const name = location.state?.name
+  const sessionTokenStorageKey = name ? getSessionTokenStorageKey(name) : null
   const socketRef = useRef(null)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
@@ -23,7 +28,10 @@ export default function PvpQuickMatch() {
 
     socket.on('connect', () => {
       setMessage('Looking for an opponent...')
-      socket.emit('join-quick-match', name)
+      socket.emit('join-quick-match', {
+        name,
+        sessionToken: sessionTokenStorageKey ? localStorage.getItem(sessionTokenStorageKey) : null,
+      })
     })
     socket.on('queue-status', ({ position }) => {
       setMessage(position === 1 ? 'Waiting for an opponent...' : `Waiting in position ${position}...`)
@@ -31,14 +39,21 @@ export default function PvpQuickMatch() {
     socket.on('queue-error', ({ reason }) => setError(reason))
     socket.on('match-found', match => setSnapshot(match))
     socket.on('game-state', nextSnapshot => {
+      if (nextSnapshot.sessionToken && sessionTokenStorageKey) {
+        localStorage.setItem(sessionTokenStorageKey, nextSnapshot.sessionToken)
+      }
       setSnapshot(nextSnapshot)
       setMessage('')
       setError('')
     })
     socket.on('move-rejected', ({ reason }) => setError(reason))
     socket.on('match-ended', ({ reason }) => {
+      if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
       setSnapshot(null)
       setMessage(reason)
+    })
+    socket.on('opponent-disconnected', ({ name: opponentName }) => {
+      setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
     })
     socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
 
@@ -47,27 +62,43 @@ export default function PvpQuickMatch() {
       socket.disconnect()
       socketRef.current = null
     }
-  }, [name, navigate])
+  }, [name, navigate, sessionTokenStorageKey])
 
   function submitMove(move) {
     socketRef.current?.emit('submit-move', move)
   }
 
   function leaveMatch() {
-    socketRef.current?.emit('leave-queue')
-    socketRef.current?.disconnect()
-    navigate('/pvp')
+    const socket = socketRef.current
+    if (!socket) {
+      navigate('/pvp')
+      return
+    }
+
+    socket.emit('leave match', result => {
+      if (!result?.ok) {
+        setError(result?.reason || 'Could not leave the match')
+        return
+      }
+
+          if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
+      socket.disconnect()
+      navigate('/pvp')
+    })
   }
 
   return (
     <main style={styles.container}>
       {snapshot ? (
-        <PvpChessBoard
-          key={`${snapshot.matchId}-${snapshot.board.join('-')}`}
-          snapshot={snapshot}
-          onSubmitMove={submitMove}
-          error={error}
-        />
+        <>
+          <PvpChessBoard
+            key={`${snapshot.matchId}-${snapshot.board.join('-')}`}
+            snapshot={snapshot}
+            onSubmitMove={submitMove}
+            error={error}
+          />
+          {message && <p style={styles.status}>{message}</p>}
+        </>
       ) : (
         <section style={styles.waitingPanel}>
           <p style={styles.kicker}>Quick Match</p>
@@ -118,6 +149,13 @@ const styles = {
     textAlign: 'center',
   },
   error: {
+    margin: 0,
+    color: '#f0a500',
+    fontFamily: 'monospace',
+    fontSize: '13px',
+    textAlign: 'center',
+  },
+  status: {
     margin: 0,
     color: '#f0a500',
     fontFamily: 'monospace',

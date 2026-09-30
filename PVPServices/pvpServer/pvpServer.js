@@ -7,20 +7,24 @@ import { DEFAULT_GAME_STATE } from '../../src/computer/engine/gameState.js'
 import {
     clearSocketPlayers,
     closeDatabase,
+    getDisconnectedUser,
     initializeDatabase,
     registerSocketPlayer,
+    removeDisconnectedUser,
     removeSocketPlayer,
-    removeUser,
+    saveDisconnectedUser,
 } from '../Models/database.js'
 import {
     closeRedis,
     enqueuePlayer,
     getGame,
     getPlayer,
+    getPlayerBySessionToken,
     getQueueLength,
     initializeRedis,
     removeGame,
     removePlayer,
+    removePlayerBySessionToken,
     removeQueuedPlayer,
     setGame,
     setPlayer,
@@ -69,6 +73,7 @@ function sendGameState(game) {
             ...snapshot,
             yourColor: player.color,
             yourName: player.name,
+            sessionToken: player.sessionToken,
             opponentName: game.players.find(other => other.socketId !== player.socketId)?.name || '',
         })
     }
@@ -119,24 +124,81 @@ async function pairPlayers() {
     }
 }
 
-async function endGame(game, disconnectedSocketId = null) {
+async function endGame(game, leavingSocketId = null, reason = 'Match ended') {
     await removeGame(game.matchId)
 
-    //todo remove players from PLAYERS_KEY
     for (const player of game.players) {
+        if (player.sessionToken) {
+            await removeDisconnectedUser(player.name, player.sessionToken)
+        }
+
         const playerState = await getPlayer(player.socketId)
         if (playerState) {
             playerState.matchId = null
             playerState.color = null
+            delete playerState.sessionToken
+            delete playerState.disconnectedAt
             await setPlayer(playerState)
+        } else if (player.sessionToken) {
+            await removePlayerBySessionToken(player.sessionToken)
         }
 
-        if (player.socketId !== disconnectedSocketId) {
+        if (player.socketId !== leavingSocketId) {
             io.to(player.socketId).emit('match-ended', {
-                reason: disconnectedSocketId ? 'Opponent disconnected' : 'Match ended',
+                reason,
             })
         }
     }
+}
+
+async function resumeDisconnectedPlayer(socket, name, sessionToken) {
+    const disconnectedUser = await getDisconnectedUser(name)
+    if (!disconnectedUser) return false
+
+    const rejectResume = () => {
+        socket.emit('queue-error', {
+            reason: 'This disconnected match could not be verified. Check your username and reconnect token.',
+        })
+        return true
+    }
+
+    if (!sessionToken || disconnectedUser.sessionToken !== sessionToken) {
+        return rejectResume()
+    }
+
+    const player = await getPlayerBySessionToken(sessionToken)
+    if (
+        !player
+        || player.sessionToken !== sessionToken
+        || player.name.toLowerCase() !== disconnectedUser.name.toLowerCase()
+        || !player.matchId
+        || !player.disconnectedAt
+    ) {
+        return rejectResume()
+    }
+
+    const game = await getGame(player.matchId)
+    const gamePlayer = game?.players.find(candidate => candidate.sessionToken === sessionToken)
+    if (!game || !gamePlayer || !gamePlayer.disconnectedAt) {
+        return rejectResume()
+    }
+
+    const registeredName = await registerSocketPlayer(socket.id, name)
+    const resumedPlayer = {
+        ...player,
+        socketId: socket.id,
+        name: registeredName,
+        disconnectedAt: null,
+    }
+    gamePlayer.socketId = socket.id
+    gamePlayer.name = registeredName
+    gamePlayer.disconnectedAt = null
+
+    await setGame(game)
+    await setPlayer(resumedPlayer)
+    await removeDisconnectedUser(registeredName, sessionToken)
+    sendGameState(game)
+    return true
 }
 
 function reject(socket, reason) {
@@ -150,8 +212,9 @@ function queueSocketEvent(operation) {
 }
 
 io.on('connection', socket => {
-    socket.on('join-quick-match', rawName => queueSocketEvent(async () => {
-        const name = normalizeName(rawName)
+    socket.on('join-quick-match', joinRequest => queueSocketEvent(async () => {
+        const name = normalizeName(typeof joinRequest === 'string' ? joinRequest : joinRequest?.name)
+        const sessionToken = typeof joinRequest === 'object' ? joinRequest?.sessionToken : null
 
         if (!NAME_PATTERN.test(name)) {
             socket.emit('queue-error', { reason: 'Name must be between 2 and 20 characters' })
@@ -164,6 +227,8 @@ io.on('connection', socket => {
                 socket.emit('queue-error', { reason: 'You are already in a match' })
                 return
             }
+
+            if (await resumeDisconnectedPlayer(socket, name, sessionToken)) return
 
             const registeredName = await registerSocketPlayer(socket.id, name)
             await removeQueuedPlayer(socket.id)
@@ -189,6 +254,26 @@ io.on('connection', socket => {
     socket.on('leave-queue', () => queueSocketEvent(async () => {
         await removeQueuedPlayer(socket.id)
         socket.emit('queue-left')
+    }))
+
+    socket.on('leave match', acknowledge => queueSocketEvent(async () => {
+        try {
+            await removeQueuedPlayer(socket.id)
+            const player = await getPlayer(socket.id)
+            if (player?.matchId) {
+                const game = await getGame(player.matchId)
+                if (game) await endGame(game, socket.id, 'Opponent left the match')
+            }
+
+            await Promise.all([
+                removePlayer(socket.id),
+                removeSocketPlayer(socket.id),
+            ])
+            acknowledge?.({ ok: true })
+        } catch (error) {
+            console.error('Could not leave match:', error)
+            acknowledge?.({ ok: false, reason: 'Could not leave the match' })
+        }
     }))
 
     socket.on('submit-move', payload => queueSocketEvent(async () => {
@@ -256,16 +341,45 @@ io.on('connection', socket => {
     socket.on('disconnect', () => queueSocketEvent(async () => {
         await removeQueuedPlayer(socket.id)
         const player = await getPlayer(socket.id)
-        if (player?.matchId) {
-            const game = await getGame(player.matchId)
-            if (game) await endGame(game, socket.id)
+        if (!player) {
+            await removeSocketPlayer(socket.id)
+            return
         }
-        console.log(player.name);
-        
+
+        if (player.matchId) {
+            const game = await getGame(player.matchId)
+            const gamePlayer = game?.players.find(candidate => candidate.sessionToken === player.sessionToken)
+            const gameIsOver = game?.gameStatus === 'checkmate-white'
+                || game?.gameStatus === 'checkmate-black'
+                || game?.gameStatus === 'stalemate'
+
+            if (game && gamePlayer && player.sessionToken && !gameIsOver) {
+                const disconnectedAt = new Date().toISOString()
+                player.disconnectedAt = disconnectedAt
+                gamePlayer.disconnectedAt = disconnectedAt
+
+                await setGame(game)
+                await setPlayer(player)
+                await saveDisconnectedUser(player.name, player.sessionToken, disconnectedAt)
+                await removePlayer(socket.id, { preserveSessionToken: true })
+                await removeSocketPlayer(socket.id)
+
+                const opponent = game.players.find(candidate => candidate.sessionToken !== player.sessionToken)
+                if (opponent) {
+                    io.to(opponent.socketId).emit('opponent-disconnected', {
+                        name: player.name,
+                        disconnectedAt,
+                    })
+                }
+                return
+            }
+
+            if (game) await endGame(game, socket.id, 'Opponent disconnected')
+        }
+
         await Promise.all([
             removePlayer(socket.id),
             removeSocketPlayer(socket.id),
-            removeUser(player.name)
         ])
     }))
 })

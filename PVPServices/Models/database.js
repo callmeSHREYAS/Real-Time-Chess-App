@@ -73,6 +73,46 @@ export async function removeUser(name) {
     await pool.query('DELETE FROM users WHERE u_name = $1', [name])
 }
 
+export async function getDisconnectedUser(name) {
+    const result = await pool.query(
+        `SELECT u_name AS name,
+                "sessionToken" AS "sessionToken",
+                "disconnectedAt" AS "disconnectedAt"
+         FROM "disconnectedUsers"
+         WHERE u_name = $1
+         LIMIT 1`,
+        [name],
+    )
+    return result.rows[0] || null
+}
+
+export async function saveDisconnectedUser(name, sessionToken, disconnectedAt) {
+    const client = await pool.connect()
+
+    try {
+        await client.query('BEGIN')
+        await client.query('DELETE FROM "disconnectedUsers" WHERE u_name = $1', [name])
+        await client.query(
+            `INSERT INTO "disconnectedUsers" (u_name, "sessionToken", "disconnectedAt")
+             VALUES ($1, $2, $3)`,
+            [name, sessionToken, disconnectedAt],
+        )
+        await client.query('COMMIT')
+    } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+    } finally {
+        client.release()
+    }
+}
+
+export async function removeDisconnectedUser(name, sessionToken) {
+    await pool.query(
+        'DELETE FROM "disconnectedUsers" WHERE u_name = $1 AND "sessionToken" = $2',
+        [name, sessionToken],
+    )
+}
+
 
 export async function clearSocketPlayers() {
     await pool.query('DELETE FROM players_by_socket')

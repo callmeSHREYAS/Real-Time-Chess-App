@@ -15,8 +15,12 @@ CREATE TABLE IF NOT EXISTS players_by_socket (
 CREATE TABLE IF NOT EXISTS "disconnectedUsers" (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     u_name CITEXT NOT NULL REFERENCES users (u_name) ON UPDATE CASCADE ON DELETE CASCADE,
-    "sessionToken" TEXT NOT NULL UNIQUE
+    "sessionToken" TEXT NOT NULL UNIQUE,
+    "disconnectedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE "disconnectedUsers"
+    ADD COLUMN IF NOT EXISTS "disconnectedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS disconnected_users_u_name_idx
     ON "disconnectedUsers" (u_name);
