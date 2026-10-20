@@ -35,6 +35,7 @@ import {
 const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const SERVER_ID = globalThis.process?.env?.PVP_SERVER_ID || `game-${PORT}`
 const NAME_PATTERN = /^.{2,20}$/u
+const RECONNECT_GRACE_MS = 30_000
 let socketEventQueue = Promise.resolve()
 let ownerOperationQueue = Promise.resolve()
 
@@ -187,6 +188,37 @@ async function endGame(game, leavingSocketId = null, reason = 'Match ended') {
     }
 }
 
+async function expireDisconnectedPlayer(name, sessionToken, disconnectedAt) {
+    const player = await getPlayerBySessionToken(sessionToken)
+    if (!player || player.disconnectedAt !== disconnectedAt) return
+
+    const disconnectedAtMs = Date.parse(disconnectedAt)
+    if (Number.isFinite(disconnectedAtMs) && Date.now() - disconnectedAtMs < RECONNECT_GRACE_MS) {
+        setTimeout(() => queueSocketEvent(
+            () => expireDisconnectedPlayer(name, sessionToken, disconnectedAt),
+        ), disconnectedAtMs + RECONNECT_GRACE_MS - Date.now())
+        return
+    }
+
+    const game = player.matchId ? await getGame(player.matchId) : null
+    const gamePlayer = game?.players.find(candidate => candidate.sessionToken === sessionToken)
+    if (game && gamePlayer?.disconnectedAt === disconnectedAt) {
+        const result = await dispatchToOwner(game, 'end-game', {
+            matchId: game.matchId,
+            reason: 'Opponent did not reconnect within 30 seconds',
+        })
+        if (!result?.ok) {
+            throw new Error(`Could not end expired match ${game.matchId}`)
+        }
+        return
+    }
+
+    await Promise.all([
+        removeDisconnectedUser(name, sessionToken),
+        removePlayerBySessionToken(sessionToken),
+    ])
+}
+
 async function resumeDisconnectedPlayer(socket, name, sessionToken) {
     const disconnectedUser = await getDisconnectedUser(name)
     if (!disconnectedUser) return false
@@ -219,6 +251,12 @@ async function resumeDisconnectedPlayer(socket, name, sessionToken) {
         return rejectResume()
     }
 
+    const disconnectedAtMs = Date.parse(player.disconnectedAt)
+    if (!Number.isFinite(disconnectedAtMs) || Date.now() - disconnectedAtMs >= RECONNECT_GRACE_MS) {
+        await expireDisconnectedPlayer(name, sessionToken, player.disconnectedAt)
+        return false
+    }
+
     const registeredName = await registerSocketPlayer(socket.id, name)
     const resumedPlayer = {
         ...player,
@@ -228,7 +266,7 @@ async function resumeDisconnectedPlayer(socket, name, sessionToken) {
     }
     gamePlayer.socketId = socket.id
     gamePlayer.name = registeredName
-    gamePlayer.     edAt = null
+    gamePlayer.disconnectedAt = null
 
     await setGame(game)
     await setPlayer(resumedPlayer)
@@ -453,6 +491,9 @@ io.on('connection', socket => {
                 await saveDisconnectedUser(player.name, player.sessionToken, disconnectedAt)
                 await removePlayer(socket.id, { preserveSessionToken: true })
                 await removeSocketPlayer(socket.id)
+                setTimeout(() => queueSocketEvent(
+                    () => expireDisconnectedPlayer(player.name, player.sessionToken, disconnectedAt),
+                ), RECONNECT_GRACE_MS)
 
                 const opponent = game.players.find(candidate => candidate.sessionToken !== player.sessionToken)
                 if (opponent) {

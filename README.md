@@ -55,10 +55,10 @@ npm run cluster:down
 - The Socket.IO Redis adapter forwards game-state and other room emissions to clients connected to any backend.
 - Clients use WebSocket-only transport through Nginx, so HTTP long-polling session affinity is not required.
 - Match creation atomically claims both queued players in Redis. Backend startup does not flush shared matchmaking or game keys.
-- Existing reconnect/disconnect behavior has not been redesigned in this change.
+- A disconnected player can reconnect to the same match for 30 seconds; after that, the match ends and the disconnected player's resume record and session-token mapping are removed.
 - Castling, en passant, promotion, captures, check, checkmate, and stalemate use the shared chess engine.
 - Promotion opens the existing piece-selection modal.
-- Closing a tab or losing the connection ends the match for the remaining player.
+- Closing a tab or losing the connection gives the player 30 seconds to reconnect before the match ends for the remaining player.
 - Usernames are trimmed and must contain 2 to 20 characters.
 - PostgreSQL stores unique, case-insensitive usernames and the active socket-to-user mapping.
 - Redis stores the FIFO matchmaking queue, active player session state, and game snapshots.
@@ -72,7 +72,7 @@ For Vite development, `.env.development` sets `VITE_PVP_URL=http://localhost:300
 
 This setup keeps each browser's physical Socket.IO connection on whichever backend Nginx selected. Both players share one logical game whose authoritative owner validates every move; the clients are not disconnected and physically transferred to that owner process after matchmaking. Nginx uses passive failure handling (`max_fails`/`fail_timeout`), while health checks are available at each backend and through the balancer.
 
-If the authoritative owner process fails, that match's moves fail closed rather than being accepted by a different process. Automatic owner election/failover, durable move transactions, and changes to the existing reconnection policy are not included and need a separate design.
+If the authoritative owner process fails, that match's moves fail closed rather than being accepted by a different process. Automatic owner election/failover and durable move transactions are not included and need a separate design.
 
 ## Useful commands
 
