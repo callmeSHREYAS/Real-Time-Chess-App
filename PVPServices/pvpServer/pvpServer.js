@@ -5,7 +5,6 @@ import { setupStartingPosition, Color } from '../../src/computer/engine/board.js
 import { DEFAULT_GAME_STATE } from '../../src/computer/engine/gameState.js'
 import { submitMove } from './gameService.js'
 import {
-    clearSocketPlayers,
     closeDatabase,
     getDisconnectedUser,
     initializeDatabase,
@@ -16,6 +15,8 @@ import {
 } from '../Models/database.js'
 import {
     closeRedis,
+    configureSocketIoAdapter,
+    createMatch,
     enqueuePlayer,
     getGame,
     getPlayer,
@@ -32,8 +33,14 @@ import {
 } from '../Models/redis.js'
 
 const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
+const SERVER_ID = globalThis.process?.env?.PVP_SERVER_ID || `game-${PORT}`
 const NAME_PATTERN = /^.{2,20}$/u
 let socketEventQueue = Promise.resolve()
+let ownerOperationQueue = Promise.resolve()
+
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error(`Invalid PvP port: ${PORT}`)
+}
 
 const httpServer = createServer()
 const io = new Server(httpServer, {
@@ -88,7 +95,27 @@ async function pairPlayers() {
             getPlayer(whiteSocketId),
             getPlayer(blackSocketId),
         ])
-        if (!whitePlayer || !blackPlayer) continue
+        if (!whitePlayer || !blackPlayer) {
+            if (whitePlayer && !whitePlayer.matchId) await enqueuePlayer(whiteSocketId)
+            if (blackPlayer && !blackPlayer.matchId) await enqueuePlayer(blackSocketId)
+            continue
+        }
+
+        const [whiteSockets, blackSockets] = await Promise.all([
+            io.in(whiteSocketId).fetchSockets(),
+            io.in(blackSocketId).fetchSockets(),
+        ])
+        if (!whiteSockets.length || !blackSockets.length) {
+            if (whiteSockets.length && !whitePlayer.matchId) await enqueuePlayer(whiteSocketId)
+            if (blackSockets.length && !blackPlayer.matchId) await enqueuePlayer(blackSocketId)
+            if (!whiteSockets.length) {
+                await Promise.all([removePlayer(whiteSocketId), removeSocketPlayer(whiteSocketId)])
+            }
+            if (!blackSockets.length) {
+                await Promise.all([removePlayer(blackSocketId), removeSocketPlayer(blackSocketId)])
+            }
+            continue
+        }
 
         whitePlayer.sessionToken = randomUUID()
         whitePlayer.disconnectedAt = null
@@ -97,6 +124,8 @@ async function pairPlayers() {
 
         const game = {
             matchId: makeId('match'),
+            ownerId: SERVER_ID,
+            version: 0,
             board: setupStartingPosition(),
             currentTurn: Color.White,
             gameState: { ...DEFAULT_GAME_STATE },
@@ -110,15 +139,23 @@ async function pairPlayers() {
             ],
         }
 
-        whitePlayer.matchId = game.matchId
-        whitePlayer.color = Color.White
-        blackPlayer.matchId = game.matchId
-        blackPlayer.color = Color.Black
-        await Promise.all([
-            setGame(game),
-            setPlayer(whitePlayer),
-            setPlayer(blackPlayer),
-        ])
+        game.players[0].matchId = game.matchId
+        game.players[1].matchId = game.matchId
+        try {
+            await createMatch(game)
+        } catch (error) {
+            console.error(`Could not create match ${game.matchId} on ${SERVER_ID}:`, error)
+            const currentPlayers = await Promise.all([
+                getPlayer(whiteSocketId),
+                getPlayer(blackSocketId),
+            ])
+            for (const [index, currentPlayer] of currentPlayers.entries()) {
+                const socketId = index === 0 ? whiteSocketId : blackSocketId
+                if (currentPlayer && !currentPlayer.matchId) await enqueuePlayer(socketId)
+            }
+            continue
+        }
+        console.log(`Created game: match=${game.matchId} owner=${SERVER_ID}`)
         sendGameState(game)
     }
 }
@@ -210,7 +247,93 @@ function queueSocketEvent(operation) {
         .catch(error => console.error('PvP socket event failed:', error))
 }
 
+function queueOwnerOperation(operation) {
+    const result = ownerOperationQueue.then(operation)
+    ownerOperationQueue = result.catch(error => {
+        console.error(`Authoritative game queue failed on ${SERVER_ID}:`, error)
+    })
+    return result
+}
+
+async function processOwnerRequest(request) {
+    if (request.eventName === 'end-game') {
+        const game = await getGame(request.data.matchId)
+        if (!game || game.ownerId !== SERVER_ID) {
+            return { ok: false, reason: 'The authoritative game server is unavailable' }
+        }
+        await endGame(game, request.data.leavingSocketId, request.data.reason)
+        return { ok: true }
+    }
+
+    if (request.eventName !== 'submit-move') return { ok: false, reason: 'Unsupported game operation' }
+
+    const player = await getPlayer(request.data.socketId)
+    const game = player?.matchId ? await getGame(player.matchId) : null
+    if (!game || game.ownerId !== SERVER_ID) {
+        return { ok: false, reason: 'The authoritative game server is unavailable' }
+    }
+
+    const gamePlayer = game.players.find(candidate => candidate.socketId === request.data.socketId)
+    if (
+        !gamePlayer
+        || gamePlayer.color !== player.color
+        || gamePlayer.sessionToken !== player.sessionToken
+    ) {
+        return { ok: false, reason: 'You are not an active player in this match' }
+    }
+
+    const result = submitMove(game, player.color, request.data.payload)
+    if (!result.ok) return result
+
+    game.version = (game.version || 0) + 1
+    await setGame(game)
+    console.log(`Accepted move: match=${game.matchId} owner=${SERVER_ID} version=${game.version}`)
+    sendGameState(game)
+    return { ok: true }
+}
+
+async function dispatchToOwner(game, eventName, data) {
+    const request = {
+        ownerId: game.ownerId,
+        eventName,
+        data,
+    }
+
+    if (request.ownerId === SERVER_ID) {
+        return queueOwnerOperation(() => processOwnerRequest(request))
+    }
+
+    const responses = await io.serverSideEmitWithAck('owner-request', request)
+    const ownerResponse = responses.find(response => response?.ownerId === request.ownerId)
+    if (!ownerResponse) {
+        throw new Error(`Authoritative game server ${request.ownerId} did not respond`)
+    }
+
+    return ownerResponse.result
+}
+
+io.on('owner-request', (request, acknowledge) => {
+    if (request.ownerId !== SERVER_ID) {
+        acknowledge({ ownerId: SERVER_ID, handled: false })
+        return
+    }
+
+    queueOwnerOperation(() => processOwnerRequest(request)).then(
+        result => acknowledge({ ownerId: SERVER_ID, handled: true, result }),
+        error => {
+            console.error(`Could not process owner request on ${SERVER_ID}:`, error)
+            acknowledge({
+                ownerId: SERVER_ID,
+                handled: true,
+                result: { ok: false, reason: 'The authoritative game server could not complete the move' },
+            })
+        },
+    )
+})
+
 io.on('connection', socket => {
+    console.log(`Socket connected: server=${SERVER_ID} port=${PORT} socket=${socket.id}`)
+
     socket.on('join-quick-match', joinRequest => queueSocketEvent(async () => {
         const name = normalizeName(typeof joinRequest === 'string' ? joinRequest : joinRequest?.name)
         const sessionToken = typeof joinRequest === 'object' ? joinRequest?.sessionToken : null
@@ -261,7 +384,14 @@ io.on('connection', socket => {
             const player = await getPlayer(socket.id)
             if (player?.matchId) {
                 const game = await getGame(player.matchId)
-                if (game) await endGame(game, socket.id, 'Opponent left the match')
+                if (game) {
+                    const result = await dispatchToOwner(game, 'end-game', {
+                        matchId: game.matchId,
+                        leavingSocketId: socket.id,
+                        reason: 'Opponent left the match',
+                    })
+                    if (!result?.ok) throw new Error('Could not end the game on its authoritative server')
+                }
             }
 
             await Promise.all([
@@ -284,14 +414,18 @@ io.on('connection', socket => {
             return
         }
 
-        const result = submitMove(game, player.color, payload)
-        if (!result.ok) {
-            reject(socket, result.reason)
-            return
+        try {
+            const result = await dispatchToOwner(game, 'submit-move', {
+                socketId: socket.id,
+                payload,
+            })
+            if (!result?.ok) {
+                reject(socket, result?.reason || 'The authoritative game server could not complete the move')
+            }
+        } catch (error) {
+            console.error(`Could not route move for match ${game.matchId}:`, error)
+            reject(socket, 'The authoritative game server is temporarily unavailable')
         }
-
-        await setGame(game)
-        sendGameState(game)
     }))
 
     socket.on('disconnect', () => queueSocketEvent(async () => {
@@ -341,11 +475,17 @@ io.on('connection', socket => {
 })
 
 await initializeDatabase()
-await clearSocketPlayers()
 await initializeRedis()
+configureSocketIoAdapter(io)
+
+httpServer.on('request', (request, response) => {
+    if (request.url !== '/healthz') return
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ok: true, serverId: SERVER_ID, port: PORT }))
+})
 
 httpServer.listen(PORT, () => {
-    console.log(`PvP server listening on http://localhost:${PORT}`)
+    console.log(`PvP server ready: server=${SERVER_ID} port=${PORT}`)
 })
 
 async function shutdown() {

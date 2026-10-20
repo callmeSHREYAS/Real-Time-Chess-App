@@ -9,11 +9,14 @@
     "dev:server": "node PVPServices/pvpServer/pvpServer.js",
     "services:up": "docker compose up -d",
     "services:down": "docker compose down",
+    "cluster:up": "docker compose up --build",
+    "cluster:down": "docker compose down -v",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "pg": "^8.23.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",

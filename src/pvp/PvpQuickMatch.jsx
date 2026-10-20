@@ -23,7 +23,9 @@ export default function PvpQuickMatch() {
       return undefined
     }
 
-    const socket = io('http://localhost:3001')
+    const socket = io(import.meta.env.VITE_PVP_URL || window.location.origin, {
+      transports: ['websocket'],
+    })
     socketRef.current = socket
 
     socket.on('connect', () => {
