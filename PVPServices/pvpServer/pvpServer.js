@@ -1,9 +1,9 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { Server } from 'socket.io'
-import { applyChessMove } from '../../src/computer/engine/applyChessMove.js'
-import { setupStartingPosition, Color, Piece } from '../../src/computer/engine/board.js'
+import { setupStartingPosition, Color } from '../../src/computer/engine/board.js'
 import { DEFAULT_GAME_STATE } from '../../src/computer/engine/gameState.js'
+import { submitMove } from './gameService.js'
 import {
     clearSocketPlayers,
     closeDatabase,
@@ -33,7 +33,6 @@ import {
 
 const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const NAME_PATTERN = /^.{2,20}$/u
-const PROMOTION_TYPES = new Set([Piece.Queen, Piece.Rook, Piece.Bishop, Piece.Knight])
 let socketEventQueue = Promise.resolve()
 
 const httpServer = createServer()
@@ -285,53 +284,10 @@ io.on('connection', socket => {
             return
         }
 
-        if (game.gameStatus === 'checkmate-white' || game.gameStatus === 'checkmate-black' || game.gameStatus === 'stalemate') {
-            reject(socket, 'The game is already over')
-            return
-        }
-
-        if (game.currentTurn !== player.color) {
-            reject(socket, 'It is not your turn')
-            return
-        }
-
-        const fromIdx = Number(payload?.fromIdx)
-        const toIdx = Number(payload?.toIdx)
-        const movingPiece = game.board[fromIdx]
-        const reachesPromotionRank = movingPiece && (movingPiece & 0b00111) === Piece.Pawn && (toIdx < 8 || toIdx >= 56)
-        const promotionType = payload?.promotionType ?? null
-
-        if (reachesPromotionRank && !PROMOTION_TYPES.has(promotionType)) {
-            reject(socket, 'Choose a promotion piece')
-            return
-        }
-
-        const result = applyChessMove({
-            board: game.board,
-            currentTurn: game.currentTurn,
-            fromIdx,
-            toIdx,
-            gameState: game.gameState,
-            enPassantSquare: game.enPassantSquare,
-            promotionType,
-        })
-
+        const result = submitMove(game, player.color, payload)
         if (!result.ok) {
             reject(socket, result.reason)
             return
-        }
-
-        game.board = result.board
-        game.currentTurn = result.currentTurn
-        game.gameState = result.gameState
-        game.enPassantSquare = result.enPassantSquare
-        game.gameStatus = result.gameStatus
-
-        if (result.capturedPiece) {
-            const capturedList = (result.capturedPiece & 0b11000) === Color.White
-                ? game.capturedWhite
-                : game.capturedBlack
-            capturedList.push({ piece: result.capturedPiece })
         }
 
         await setGame(game)
