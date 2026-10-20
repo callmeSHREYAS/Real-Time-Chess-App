@@ -228,7 +228,7 @@ async function resumeDisconnectedPlayer(socket, name, sessionToken) {
     }
     gamePlayer.socketId = socket.id
     gamePlayer.name = registeredName
-    gamePlayer.disconnectedAt = null
+    gamePlayer.     edAt = null
 
     await setGame(game)
     await setPlayer(resumedPlayer)
