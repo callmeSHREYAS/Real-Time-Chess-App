@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 export default function PvpDashboard() {
+  const location = useLocation()
   const navigate = useNavigate()
   const [name, setName] = useState('')
   const [error, setError] = useState('')
+  const matchEndReason = location.state?.matchEndReason
 
   function startQuickMatch() {
     const trimmedName = name.trim()
@@ -21,6 +23,7 @@ export default function PvpDashboard() {
       <section style={styles.panel}>
         <p style={styles.kicker}>PVP Mode</p>
         <h1 style={styles.title}>Choose Match Type</h1>
+        {matchEndReason && <p role="status" style={styles.matchEndReason}>{matchEndReason}</p>}
 
         <label style={styles.nameField}>
           <span style={styles.nameLabel}>Your username</span>
@@ -89,6 +92,13 @@ const styles = {
     fontFamily: 'Georgia, serif',
     fontSize: 'clamp(34px, 8vw, 56px)',
     letterSpacing: '0',
+  },
+  matchEndReason: {
+    margin: '-10px 0 0',
+    color: '#f0a500',
+    fontFamily: 'monospace',
+    fontSize: '14px',
+    textAlign: 'center',
   },
   nameField: {
     width: '100%',

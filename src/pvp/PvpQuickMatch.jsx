@@ -13,6 +13,7 @@ export default function PvpQuickMatch() {
   const name = location.state?.name
   const sessionTokenStorageKey = name ? getSessionTokenStorageKey(name) : null
   const socketRef = useRef(null)
+  const matchEndingRef = useRef(false)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
   const [error, setError] = useState('')
@@ -49,10 +50,16 @@ export default function PvpQuickMatch() {
       setError('')
     })
     socket.on('move-rejected', ({ reason }) => setError(reason))
-    socket.on('match-ended', ({ reason }) => {
+    socket.on('match-ended', ({ reason }, acknowledge) => {
+      matchEndingRef.current = true
       if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
-      setSnapshot(null)
-      setMessage(reason)
+      navigate('/pvp', {
+        replace: true,
+        state: { matchEndReason: reason },
+      })
+      window.setTimeout(() => {
+        acknowledge?.()
+      }, 100)
     })
     socket.on('opponent-disconnected', ({ name: opponentName }) => {
       setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
@@ -60,8 +67,10 @@ export default function PvpQuickMatch() {
     socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
 
     return () => {
-      socket.emit('leave-queue')
-      socket.disconnect()
+      if (!matchEndingRef.current) {
+        socket.emit('leave-queue')
+        socket.disconnect()
+      }
       socketRef.current = null
     }
   }, [name, navigate, sessionTokenStorageKey])
@@ -83,9 +92,10 @@ export default function PvpQuickMatch() {
         return
       }
 
-          if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
-      socket.disconnect()
-      navigate('/pvp')
+      if (!snapshot) {
+        socket.disconnect()
+        navigate('/pvp')
+      }
     })
   }
 

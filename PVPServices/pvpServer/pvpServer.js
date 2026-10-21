@@ -162,28 +162,32 @@ async function pairPlayers() {
 }
 
 async function endGame(game, leavingSocketId = null, reason = 'Match ended') {
-    await removeGame(game.matchId)
+    const socketIds = game.players.map(player => player.socketId).filter(Boolean)
+    await Promise.all(game.players.map(player => new Promise(resolve => {
+        const playerReason = player.socketId === leavingSocketId
+            ? 'You left the match.'
+            : reason
+        io.to(player.socketId).timeout(1500).emit('match-ended', {
+            reason: playerReason,
+        }, () => resolve())
+    })))
 
-    for (const player of game.players) {
-        if (player.sessionToken) {
-            await removeDisconnectedUser(player.name, player.sessionToken)
-        }
+    try {
+        await removeGame(game.matchId)
 
-        const playerState = await getPlayer(player.socketId)
-        if (playerState) {
-            playerState.matchId = null
-            playerState.color = null
-            delete playerState.sessionToken
-            delete playerState.disconnectedAt
-            await setPlayer(playerState)
-        } else if (player.sessionToken) {
-            await removePlayerBySessionToken(player.sessionToken)
-        }
-
-        if (player.socketId !== leavingSocketId) {
-            io.to(player.socketId).emit('match-ended', {
-                reason,
-            })
+        await Promise.all(game.players.flatMap(player => [
+            removePlayer(player.socketId),
+            removeSocketPlayer(player.socketId),
+            ...(player.sessionToken
+                ? [
+                    removePlayerBySessionToken(player.sessionToken),
+                    removeDisconnectedUser(player.name, player.sessionToken),
+                ]
+                : []),
+        ]))
+    } finally {
+        if (socketIds.length) {
+            io.in(socketIds).disconnectSockets(true)
         }
     }
 }
@@ -326,6 +330,19 @@ async function processOwnerRequest(request) {
     game.version = (game.version || 0) + 1
     await setGame(game)
     console.log(`Accepted move: match=${game.matchId} owner=${SERVER_ID} version=${game.version}`)
+    if (game.gameStatus === 'checkmate-white') {
+        await endGame(game, null, 'Checkmate. Black wins.')
+        return { ok: true }
+    }
+    if (game.gameStatus === 'checkmate-black') {
+        await endGame(game, null, 'Checkmate. White wins.')
+        return { ok: true }
+    }
+    if (game.gameStatus === 'stalemate') {
+        await endGame(game, null, 'Stalemate. The match is a draw.')
+        return { ok: true }
+    }
+
     sendGameState(game)
     return { ok: true }
 }
