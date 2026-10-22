@@ -13,7 +13,10 @@ export default function PvpQuickMatch() {
   const name = location.state?.name
   const sessionTokenStorageKey = name ? getSessionTokenStorageKey(name) : null
   const socketRef = useRef(null)
+  const pendingSocketRef = useRef(null)
   const matchEndingRef = useRef(false)
+  const handoffInProgressRef = useRef(false)
+  const playerAuthRef = useRef(null)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
   const [error, setError] = useState('')
@@ -29,6 +32,48 @@ export default function PvpQuickMatch() {
     })
     socketRef.current = socket
 
+    function onMatchAuthenticated(gameSocket, authentication, isHandoff) {
+      playerAuthRef.current = authentication
+      if (authentication.sessionToken && sessionTokenStorageKey) {
+        localStorage.setItem(sessionTokenStorageKey, authentication.sessionToken)
+      }
+      if (isHandoff) {
+        socketRef.current = gameSocket
+        pendingSocketRef.current = null
+        handoffInProgressRef.current = false
+        socket.disconnect()
+      }
+      setMessage('')
+      setError('')
+    }
+
+    function addGameSocketHandlers(gameSocket, isHandoff = false) {
+      gameSocket.on('match-authenticated', authentication => {
+        onMatchAuthenticated(gameSocket, authentication, isHandoff)
+      })
+      gameSocket.on('game-state', nextSnapshot => {
+        if (!playerAuthRef.current) return
+        setSnapshot({ ...nextSnapshot, ...playerAuthRef.current })
+        setMessage('')
+        setError('')
+      })
+      gameSocket.on('match-ended', ({ reason }, acknowledge) => {
+        matchEndingRef.current = true
+        if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
+        navigate('/pvp', {
+          replace: true,
+          state: { matchEndReason: reason },
+        })
+        window.setTimeout(() => {
+          acknowledge?.()
+        }, 100)
+      })
+      gameSocket.on('opponent-disconnected', ({ name: opponentName }) => {
+        setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
+      })
+    }
+
+    addGameSocketHandlers(socket)
     socket.on('connect', () => {
       setMessage('Looking for an opponent...')
       socket.emit('join-quick-match', {
@@ -40,38 +85,46 @@ export default function PvpQuickMatch() {
       setMessage(position === 1 ? 'Waiting for an opponent...' : `Waiting in position ${position}...`)
     })
     socket.on('queue-error', ({ reason }) => setError(reason))
-    socket.on('match-found', match => setSnapshot(match))
-    socket.on('game-state', nextSnapshot => {
-      if (nextSnapshot.sessionToken && sessionTokenStorageKey) {
-        localStorage.setItem(sessionTokenStorageKey, nextSnapshot.sessionToken)
-      }
-      setSnapshot(nextSnapshot)
-      setMessage('')
-      setError('')
+    socket.on('match-handoff', ({ matchId, serverUrl, handoffToken }) => {
+      if (handoffInProgressRef.current) return
+      handoffInProgressRef.current = true
+      setMessage('Connecting to the game server...')
+
+      const gameSocket = io(serverUrl, {
+        transports: ['websocket'],
+        autoConnect: false,
+      })
+      pendingSocketRef.current = gameSocket
+      addGameSocketHandlers(gameSocket, true)
+      gameSocket.on('connect', () => {
+        gameSocket.emit('authenticate-match', { matchId, handoffToken })
+      })
+      gameSocket.on('match-auth-error', ({ reason }) => {
+        handoffInProgressRef.current = false
+        pendingSocketRef.current = null
+        gameSocket.disconnect()
+        setError(reason)
+      })
+      gameSocket.on('connect_error', () => {
+        handoffInProgressRef.current = false
+        pendingSocketRef.current = null
+        gameSocket.disconnect()
+        setError('Could not connect to the selected game server.')
+      })
+      gameSocket.connect()
     })
     socket.on('move-rejected', ({ reason }) => setError(reason))
-    socket.on('match-ended', ({ reason }, acknowledge) => {
-      matchEndingRef.current = true
-      if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
-      navigate('/pvp', {
-        replace: true,
-        state: { matchEndReason: reason },
-      })
-      window.setTimeout(() => {
-        acknowledge?.()
-      }, 100)
-    })
-    socket.on('opponent-disconnected', ({ name: opponentName }) => {
-      setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
-    })
+    socket.on('match-auth-error', ({ reason }) => setError(reason))
     socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
 
     return () => {
-      if (!matchEndingRef.current) {
-        socket.emit('leave-queue')
-        socket.disconnect()
-      }
+      if (!matchEndingRef.current) socket.emit('leave-queue')
+      socket.disconnect()
+      pendingSocketRef.current?.disconnect()
       socketRef.current = null
+      pendingSocketRef.current = null
+      playerAuthRef.current = null
+      handoffInProgressRef.current = false
     }
   }, [name, navigate, sessionTokenStorageKey])
 
@@ -94,6 +147,7 @@ export default function PvpQuickMatch() {
 
       if (!snapshot) {
         socket.disconnect()
+        pendingSocketRef.current?.disconnect()
         navigate('/pvp')
       }
     })

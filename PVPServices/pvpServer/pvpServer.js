@@ -12,21 +12,26 @@ import {
     removeDisconnectedUser,
     removeSocketPlayer,
     saveDisconnectedUser,
+    transferSocketPlayer,
 } from '../Models/database.js'
 import {
     closeRedis,
     configureSocketIoAdapter,
+    consumeHandoffToken,
     createMatch,
+    createHandoffToken,
     enqueuePlayer,
     getGame,
     getPlayer,
     getPlayerBySessionToken,
     getQueueLength,
+    heartbeatGameServer,
     initializeRedis,
     removeGame,
     removePlayer,
     removePlayerBySessionToken,
     removeQueuedPlayer,
+    selectGameServer,
     setGame,
     setPlayer,
     takeQueuedPair,
@@ -36,6 +41,12 @@ const PORT = Number(globalThis.process?.env?.PVP_PORT || 3001)
 const SERVER_ID = globalThis.process?.env?.PVP_SERVER_ID || `game-${PORT}`
 const NAME_PATTERN = /^.{2,20}$/u
 const RECONNECT_GRACE_MS = 30_000
+const GAME_SERVERS = loadGameServers()
+const CORS_ORIGINS = (globalThis.process?.env?.PVP_CORS_ORIGINS
+    || 'http://localhost:5173,http://127.0.0.1:5173')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean)
 let socketEventQueue = Promise.resolve()
 let ownerOperationQueue = Promise.resolve()
 
@@ -46,10 +57,37 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 const httpServer = createServer()
 const io = new Server(httpServer, {
     cors: {
-        origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+        origin: CORS_ORIGINS,
         methods: ['GET', 'POST'],
     },
 })
+
+function loadGameServers() {
+    const configuredServers = globalThis.process?.env?.PVP_GAME_SERVERS
+    const servers = configuredServers
+        ? JSON.parse(configuredServers)
+        : [{
+            id: SERVER_ID,
+            url: globalThis.process?.env?.PVP_PUBLIC_URL || `http://localhost:${PORT}`,
+        }]
+    if (
+        !Array.isArray(servers)
+        || servers.length === 0
+        || servers.some(server => (
+            typeof server?.id !== 'string'
+            || !server.id
+            || typeof server?.url !== 'string'
+            || !['http:', 'https:'].includes(new URL(server.url).protocol)
+        ))
+        || new Set(servers.map(server => server.id)).size !== servers.length
+    ) {
+        throw new Error('PVP_GAME_SERVERS must be a non-empty list of unique server IDs and HTTP(S) URLs')
+    }
+    if (!servers.some(server => server.id === SERVER_ID)) {
+        throw new Error(`PVP_GAME_SERVERS must include this server: ${SERVER_ID}`)
+    }
+    return servers
+}
 
 function makeId(prefix) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -74,16 +112,7 @@ function getGameSnapshot(game) {
 }
 
 function sendGameState(game) {
-    const snapshot = getGameSnapshot(game)
-    for (const player of game.players) {
-        io.to(player.socketId).emit('game-state', {
-            ...snapshot,
-            yourColor: player.color,
-            yourName: player.name,
-            sessionToken: player.sessionToken,
-            opponentName: game.players.find(other => other.socketId !== player.socketId)?.name || '',
-        })
-    }
+    io.to(game.matchId).emit('game-state', getGameSnapshot(game))
 }
 
 async function pairPlayers() {
@@ -118,6 +147,15 @@ async function pairPlayers() {
             continue
         }
 
+        let owner
+        try {
+            owner = await selectGameServer(GAME_SERVERS)
+        } catch (error) {
+            console.error(`Could not select a game server on ${SERVER_ID}:`, error)
+            await Promise.all([enqueuePlayer(whiteSocketId), enqueuePlayer(blackSocketId)])
+            return
+        }
+
         whitePlayer.sessionToken = randomUUID()
         whitePlayer.disconnectedAt = null
         blackPlayer.sessionToken = randomUUID()
@@ -125,7 +163,8 @@ async function pairPlayers() {
 
         const game = {
             matchId: makeId('match'),
-            ownerId: SERVER_ID,
+            ownerId: owner.id,
+            ownerUrl: owner.url,
             version: 0,
             board: setupStartingPosition(),
             currentTurn: Color.White,
@@ -143,7 +182,24 @@ async function pairPlayers() {
         game.players[0].matchId = game.matchId
         game.players[1].matchId = game.matchId
         try {
+            const handoffTokens = [randomUUID(), randomUUID()]
+            await Promise.all(game.players.map((player, index) => createHandoffToken(
+                handoffTokens[index],
+                {
+                    matchId: game.matchId,
+                    ownerId: game.ownerId,
+                    sessionToken: player.sessionToken,
+                    previousSocketId: player.socketId,
+                },
+            )))
             await createMatch(game)
+            for (const [index, player] of game.players.entries()) {
+                io.to(player.socketId).emit('match-handoff', {
+                    matchId: game.matchId,
+                    serverUrl: game.ownerUrl,
+                    handoffToken: handoffTokens[index],
+                })
+            }
         } catch (error) {
             console.error(`Could not create match ${game.matchId} on ${SERVER_ID}:`, error)
             const currentPlayers = await Promise.all([
@@ -156,8 +212,7 @@ async function pairPlayers() {
             }
             continue
         }
-        console.log(`Created game: match=${game.matchId} owner=${SERVER_ID}`)
-        sendGameState(game)
+        console.log(`Created game: match=${game.matchId} owner=${game.ownerId}`)
     }
 }
 
@@ -272,9 +327,17 @@ async function resumeDisconnectedPlayer(socket, name, sessionToken) {
     gamePlayer.name = registeredName
     gamePlayer.disconnectedAt = null
 
+    await socket.join(game.matchId)
     await setGame(game)
     await setPlayer(resumedPlayer)
     await removeDisconnectedUser(registeredName, sessionToken)
+    socket.emit('match-authenticated', {
+        matchId: game.matchId,
+        yourColor: gamePlayer.color,
+        yourName: gamePlayer.name,
+        sessionToken,
+        opponentName: game.players.find(other => other.sessionToken !== sessionToken)?.name || '',
+    })
     sendGameState(game)
     return true
 }
@@ -295,6 +358,49 @@ function queueOwnerOperation(operation) {
         console.error(`Authoritative game queue failed on ${SERVER_ID}:`, error)
     })
     return result
+}
+
+async function authenticateMatch(socket, { matchId, handoffToken }) {
+    const game = typeof matchId === 'string' ? await getGame(matchId) : null
+    if (!game || game.ownerId !== SERVER_ID) {
+        return { ok: false, reason: 'The selected game server could not find this match' }
+    }
+
+    const credential = await consumeHandoffToken(handoffToken, matchId, SERVER_ID)
+    if (!credential) {
+        return { ok: false, reason: 'The match handoff token is invalid or expired' }
+    }
+    const gamePlayer = game.players.find(player => player.sessionToken === credential.sessionToken)
+    if (!gamePlayer || gamePlayer.socketId !== credential.previousSocketId) {
+        return { ok: false, reason: 'The match handoff could not be verified' }
+    }
+
+    const registeredName = await transferSocketPlayer(
+        credential.previousSocketId,
+        socket.id,
+        gamePlayer.name,
+    )
+    await removePlayer(credential.previousSocketId, { preserveSessionToken: true })
+    gamePlayer.socketId = socket.id
+    gamePlayer.name = registeredName
+    gamePlayer.disconnectedAt = null
+    game.version = (game.version || 0) + 1
+    await setGame(game)
+    await setPlayer(gamePlayer)
+    await removeDisconnectedUser(registeredName, gamePlayer.sessionToken)
+    await socket.join(game.matchId)
+    socket.emit('match-authenticated', {
+        matchId: game.matchId,
+        yourColor: gamePlayer.color,
+        yourName: gamePlayer.name,
+        sessionToken: gamePlayer.sessionToken,
+        opponentName: game.players.find(
+            player => player.sessionToken !== gamePlayer.sessionToken,
+        )?.name || '',
+    })
+    sendGameState(game)
+    console.log(`Authenticated handoff: match=${game.matchId} player=${registeredName} owner=${SERVER_ID}`)
+    return { ok: true }
 }
 
 async function processOwnerRequest(request) {
@@ -428,6 +534,18 @@ io.on('connection', socket => {
         }
     }))
 
+    socket.on('authenticate-match', request => queueSocketEvent(async () => {
+        try {
+            const result = await queueOwnerOperation(
+                () => authenticateMatch(socket, request || {}),
+            )
+            if (!result.ok) socket.emit('match-auth-error', { reason: result.reason })
+        } catch (error) {
+            console.error(`Could not authenticate match handoff on ${SERVER_ID}:`, error)
+            socket.emit('match-auth-error', { reason: 'Could not join the selected game server' })
+        }
+    }))
+
     socket.on('leave-queue', () => queueSocketEvent(async () => {
         await removeQueuedPlayer(socket.id)
         socket.emit('queue-left')
@@ -535,6 +653,13 @@ io.on('connection', socket => {
 await initializeDatabase()
 await initializeRedis()
 configureSocketIoAdapter(io)
+await heartbeatGameServer(SERVER_ID)
+const heartbeatTimer = setInterval(() => {
+    heartbeatGameServer(SERVER_ID).catch(error => {
+        console.error(`Could not refresh server heartbeat for ${SERVER_ID}:`, error)
+    })
+}, 5_000)
+heartbeatTimer.unref?.()
 
 httpServer.on('request', (request, response) => {
     if (request.url !== '/healthz') return
@@ -547,6 +672,7 @@ httpServer.listen(PORT, () => {
 })
 
 async function shutdown() {
+    clearInterval(heartbeatTimer)
     io.close(async () => {
         await Promise.all([closeDatabase(), closeRedis()])
         globalThis.process?.exit(0)

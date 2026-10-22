@@ -1,3 +1,8 @@
+x-pvp-common-env: &pvp-common-env
+  REDIS_URL: redis://redis:6379
+  DATABASE_URL: postgres://chess:chess@postgres:5432/chess
+  PVP_GAME_SERVERS: '[{"id":"game-01","url":"http://localhost:3001"},{"id":"game-02","url":"http://localhost:3002"},{"id":"game-03","url":"http://localhost:3003"},{"id":"game-04","url":"http://localhost:3004"},{"id":"game-05","url":"http://localhost:3005"}]'
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -32,6 +37,7 @@ services:
   game-server-1:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-01
       PVP_PORT: 3001
       REDIS_URL: redis://redis:6379
@@ -52,6 +58,7 @@ services:
   game-server-2:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-02
       PVP_PORT: 3002
       REDIS_URL: redis://redis:6379
@@ -72,6 +79,7 @@ services:
   game-server-3:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-03
       PVP_PORT: 3003
       REDIS_URL: redis://redis:6379
@@ -89,6 +97,44 @@ services:
       timeout: 3s
       retries: 10
 
+  game-server-4:
+    build: .
+    environment:
+      <<: *pvp-common-env
+      PVP_SERVER_ID: game-04
+      PVP_PORT: 3004
+    ports:
+      - "3004:3004"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3004/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  game-server-5:
+    build: .
+    environment:
+      <<: *pvp-common-env
+      PVP_SERVER_ID: game-05
+      PVP_PORT: 3005
+    ports:
+      - "3005:3005"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3005/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   nginx:
     image: nginx:1.27-alpine
     ports:
@@ -101,6 +147,10 @@ services:
       game-server-2:
         condition: service_healthy
       game-server-3:
+        condition: service_healthy
+      game-server-4:
+        condition: service_healthy
+      game-server-5:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/healthz >/dev/null"]
