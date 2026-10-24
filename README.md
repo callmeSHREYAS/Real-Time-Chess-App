@@ -56,6 +56,7 @@ npm run cluster:down
 - Clients use WebSocket-only transport through Nginx, so HTTP long-polling session affinity is not required.
 - Match creation atomically claims both queued players in Redis. Backend startup does not flush shared matchmaking or game keys.
 - A disconnected player can reconnect to the same match for 30 seconds; after that, the match ends and the disconnected player's resume record and session-token mapping are removed.
+- If both players disconnect before either reconnects, the match ends immediately and both players' session-token mappings and disconnected-user records are removed.
 - When a match ends (timeout, leaving, checkmate, or stalemate), both connected players are shown the end reason on the PvP dashboard before the server disconnects their sockets and removes their active player records.
 - Castling, en passant, promotion, captures, check, checkmate, and stalemate use the shared chess engine.
 - Promotion opens the existing piece-selection modal.

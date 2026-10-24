@@ -155,6 +155,24 @@ export async function setGame(game) {
     await redis.hSet(GAMES_KEY, game.matchId, JSON.stringify(game))
 }
 
+export async function markGamePlayerDisconnected(matchId, sessionToken, disconnectedAt) {
+    const serializedGame = await redis.eval(
+        `local serialized = redis.call('HGET', KEYS[1], ARGV[1])
+         if not serialized then return false end
+         local game = cjson.decode(serialized)
+         for _, player in ipairs(game.players) do
+             if player.sessionToken == ARGV[2] then
+                 player.disconnectedAt = ARGV[3]
+                 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(game))
+                 return cjson.encode(game)
+             end
+         end
+         return false`,
+        { keys: [GAMES_KEY], arguments: [matchId, sessionToken, disconnectedAt] },
+    )
+    return serializedGame ? JSON.parse(serializedGame) : null
+}
+
 export async function removeGame(matchId) {
     await redis.hDel(GAMES_KEY, matchId)
 }
