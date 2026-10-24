@@ -13,6 +13,7 @@ export default function PvpQuickMatch() {
   const name = location.state?.name
   const sessionTokenStorageKey = name ? getSessionTokenStorageKey(name) : null
   const socketRef = useRef(null)
+  const pendingSocketRef = useRef(null)
   const matchEndingRef = useRef(false)
   const [snapshot, setSnapshot] = useState(null)
   const [message, setMessage] = useState('Connecting to matchmaking...')
@@ -24,10 +25,87 @@ export default function PvpQuickMatch() {
       return undefined
     }
 
-    const socket = io(import.meta.env.VITE_PVP_URL || window.location.origin, {
+    const matchmakingUrl = import.meta.env.VITE_PVP_URL || window.location.origin
+    let activeServerUrl = new URL(matchmakingUrl, window.location.origin).origin
+    let handoffTargetUrl = null
+    const socket = io(matchmakingUrl, {
       transports: ['websocket'],
     })
     socketRef.current = socket
+
+    function saveSessionToken(sessionToken) {
+      if (sessionToken && sessionTokenStorageKey) {
+        localStorage.setItem(sessionTokenStorageKey, sessionToken)
+      }
+    }
+
+    function handleGameState(sourceSocket, nextSnapshot) {
+      saveSessionToken(nextSnapshot.sessionToken)
+      const targetUrl = nextSnapshot.gameServerUrl
+        ? new URL(nextSnapshot.gameServerUrl, window.location.origin).origin
+        : activeServerUrl
+
+      if (targetUrl !== activeServerUrl) {
+        if (handoffTargetUrl === targetUrl) return
+        handoffTargetUrl = targetUrl
+        setMessage('Joining the match server...')
+        setError('')
+
+        const gameSocket = io(targetUrl, { transports: ['websocket'] })
+        pendingSocketRef.current = gameSocket
+        bindGameEvents(gameSocket)
+        gameSocket.on('connect', () => {
+          gameSocket.emit('authenticate-game', {
+            matchId: nextSnapshot.matchId,
+            sessionToken: nextSnapshot.sessionToken,
+          }, result => {
+            if (!result?.ok) {
+              setError(result?.reason || 'Could not authenticate with the match server.')
+              handoffTargetUrl = null
+              pendingSocketRef.current = null
+              gameSocket.disconnect()
+              return
+            }
+
+            activeServerUrl = targetUrl
+            handoffTargetUrl = null
+            pendingSocketRef.current = null
+            socketRef.current = gameSocket
+            saveSessionToken(result.snapshot.sessionToken)
+            setSnapshot(result.snapshot)
+            setMessage('')
+            setError('')
+            sourceSocket.disconnect()
+          })
+        })
+        gameSocket.on('connect_error', () => {
+          setError('Could not connect to the match server.')
+        })
+        return
+      }
+
+      saveSessionToken(nextSnapshot.sessionToken)
+      setSnapshot(nextSnapshot)
+      setMessage('')
+      setError('')
+    }
+
+    function bindGameEvents(gameSocket) {
+      gameSocket.on('game-state', nextSnapshot => handleGameState(gameSocket, nextSnapshot))
+      gameSocket.on('move-rejected', ({ reason }) => setError(reason))
+      gameSocket.on('match-ended', ({ reason }, acknowledge) => {
+        matchEndingRef.current = true
+        if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
+        navigate('/pvp', {
+          replace: true,
+          state: { matchEndReason: reason },
+        })
+        window.setTimeout(() => acknowledge?.(), 100)
+      })
+      gameSocket.on('opponent-disconnected', ({ name: opponentName }) => {
+        setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
+      })
+    }
 
     socket.on('connect', () => {
       setMessage('Looking for an opponent...')
@@ -40,38 +118,18 @@ export default function PvpQuickMatch() {
       setMessage(position === 1 ? 'Waiting for an opponent...' : `Waiting in position ${position}...`)
     })
     socket.on('queue-error', ({ reason }) => setError(reason))
-    socket.on('match-found', match => setSnapshot(match))
-    socket.on('game-state', nextSnapshot => {
-      if (nextSnapshot.sessionToken && sessionTokenStorageKey) {
-        localStorage.setItem(sessionTokenStorageKey, nextSnapshot.sessionToken)
-      }
-      setSnapshot(nextSnapshot)
-      setMessage('')
-      setError('')
-    })
-    socket.on('move-rejected', ({ reason }) => setError(reason))
-    socket.on('match-ended', ({ reason }, acknowledge) => {
-      matchEndingRef.current = true
-      if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
-      navigate('/pvp', {
-        replace: true,
-        state: { matchEndReason: reason },
-      })
-      window.setTimeout(() => {
-        acknowledge?.()
-      }, 100)
-    })
-    socket.on('opponent-disconnected', ({ name: opponentName }) => {
-      setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
-    })
+    bindGameEvents(socket)
     socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
 
     return () => {
       if (!matchEndingRef.current) {
         socket.emit('leave-queue')
-        socket.disconnect()
       }
+      socket.disconnect()
+      if (socketRef.current && socketRef.current !== socket) socketRef.current.disconnect()
+      if (pendingSocketRef.current) pendingSocketRef.current.disconnect()
       socketRef.current = null
+      pendingSocketRef.current = null
     }
   }, [name, navigate, sessionTokenStorageKey])
 

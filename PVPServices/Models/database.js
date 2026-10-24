@@ -69,6 +69,41 @@ export async function removeSocketPlayer(socketId) {
     await pool.query('DELETE FROM players_by_socket WHERE socket_id = $1', [socketId])
 }
 
+export async function replaceSocketPlayer(previousSocketId, socketId, name) {
+    const client = await pool.connect()
+
+    try {
+        await client.query('BEGIN')
+        if (previousSocketId !== socketId) {
+            const updated = await client.query(
+                `UPDATE players_by_socket
+                 SET socket_id = $2
+                 WHERE socket_id = $1 AND u_name = $3`,
+                [previousSocketId, socketId, name],
+            )
+            if (updated.rowCount === 1) {
+                await client.query('COMMIT')
+                return
+            }
+        }
+
+        const current = await client.query(
+            'SELECT socket_id FROM players_by_socket WHERE u_name = $1',
+            [name],
+        )
+        if (current.rows[0]?.socket_id !== socketId) {
+            throw new Error(`Could not transfer database socket mapping for ${name}`)
+        }
+
+        await client.query('COMMIT')
+    } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+    } finally {
+        client.release()
+    }
+}
+
 export async function removeUser(name) {
     await pool.query('DELETE FROM users WHERE u_name = $1', [name])
 }

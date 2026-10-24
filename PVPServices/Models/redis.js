@@ -146,9 +146,16 @@ function deserializePlayer(serializedPlayer) {
     return { ...player, socketId: socketId ?? player.socketId }
 }
 
+function deserializeGame(serializedGame) {
+    const game = JSON.parse(serializedGame)
+    if (!Array.isArray(game.capturedWhite)) game.capturedWhite = []
+    if (!Array.isArray(game.capturedBlack)) game.capturedBlack = []
+    return game
+}
+
 export async function getGame(matchId) {
     const game = await redis.hGet(GAMES_KEY, matchId)
-    return game ? JSON.parse(game) : null
+    return game ? deserializeGame(game) : null
 }
 
 export async function setGame(game) {
@@ -160,17 +167,89 @@ export async function markGamePlayerDisconnected(matchId, sessionToken, disconne
         `local serialized = redis.call('HGET', KEYS[1], ARGV[1])
          if not serialized then return false end
          local game = cjson.decode(serialized)
-         for _, player in ipairs(game.players) do
-             if player.sessionToken == ARGV[2] then
-                 player.disconnectedAt = ARGV[3]
-                 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(game))
-                 return cjson.encode(game)
-             end
-         end
+        local function encodeGame(value)
+            local encoded = cjson.encode(value)
+            if type(value.capturedWhite) == 'table' and next(value.capturedWhite) == nil then
+                encoded = string.gsub(encoded, '"capturedWhite":{}', '"capturedWhite":[]')
+            end
+            if type(value.capturedBlack) == 'table' and next(value.capturedBlack) == nil then
+                encoded = string.gsub(encoded, '"capturedBlack":{}', '"capturedBlack":[]')
+            end
+            return encoded
+        end
+        for _, player in ipairs(game.players) do
+            if player.sessionToken == ARGV[2] then
+                player.disconnectedAt = ARGV[3]
+                local updated = encodeGame(game)
+                redis.call('HSET', KEYS[1], ARGV[1], updated)
+                return updated
+            end
+        end
          return false`,
         { keys: [GAMES_KEY], arguments: [matchId, sessionToken, disconnectedAt] },
     )
     return serializedGame ? JSON.parse(serializedGame) : null
+}
+
+export async function handoffGamePlayer(matchId, sessionToken, socketId, ownerId, previousSocketId) {
+    const result = await redis.eval(
+        `local serializedPlayer = redis.call('HGET', KEYS[1], ARGV[2])
+         if not serializedPlayer then return {} end
+         local player = cjson.decode(serializedPlayer)
+         if player.matchId ~= ARGV[1]
+             or (player.disconnectedAt ~= nil and player.disconnectedAt ~= cjson.null) then return {} end
+
+         local serializedGame = redis.call('HGET', KEYS[2], ARGV[1])
+         if not serializedGame then return {} end
+         local game = cjson.decode(serializedGame)
+         local function encodeGame(value)
+             local encoded = cjson.encode(value)
+             if type(value.capturedWhite) == 'table' and next(value.capturedWhite) == nil then
+                 encoded = string.gsub(encoded, '"capturedWhite":{}', '"capturedWhite":[]')
+             end
+             if type(value.capturedBlack) == 'table' and next(value.capturedBlack) == nil then
+                 encoded = string.gsub(encoded, '"capturedBlack":{}', '"capturedBlack":[]')
+             end
+             return encoded
+         end
+         if game.ownerId ~= ARGV[4] then return {} end
+
+         local oldSocketId = player.socket_id or player.socketId
+         if not oldSocketId
+             or (oldSocketId ~= ARGV[5] and oldSocketId ~= ARGV[3]) then return {} end
+         local matched = false
+         for _, gamePlayer in ipairs(game.players) do
+             if gamePlayer.sessionToken == ARGV[2] then
+                 if gamePlayer.disconnectedAt ~= nil and gamePlayer.disconnectedAt ~= cjson.null then return {} end
+                 gamePlayer.socketId = ARGV[3]
+                 matched = true
+                 break
+             end
+         end
+         if not matched then return {} end
+
+         player.socket_id = ARGV[3]
+         player.socketId = nil
+         if oldSocketId ~= ARGV[3] then
+             redis.call('HDEL', KEYS[3], oldSocketId)
+         end
+         redis.call('HSET', KEYS[3], ARGV[3], cjson.encode(player))
+         redis.call('HSET', KEYS[1], ARGV[2], cjson.encode(player))
+         local updatedGame = encodeGame(game)
+         redis.call('HSET', KEYS[2], ARGV[1], updatedGame)
+         return { oldSocketId, updatedGame, cjson.encode(player) }`,
+        {
+            keys: [SESSION_PLAYERS_KEY, GAMES_KEY, PLAYERS_KEY],
+            arguments: [matchId, sessionToken, socketId, ownerId, previousSocketId],
+        },
+    )
+    if (!result?.length) return null
+
+    return {
+        previousSocketId: result[0],
+        game: deserializeGame(result[1]),
+        player: deserializePlayer(result[2]),
+    }
 }
 
 export async function removeGame(matchId) {

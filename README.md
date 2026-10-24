@@ -10,7 +10,7 @@ Install dependencies:
 npm install
 ```
 
-Start the shared PostgreSQL/Redis services, three PvP backends, and Nginx:
+Start the shared PostgreSQL/Redis services, five PvP backends, and Nginx:
 
 ```bash
 npm run cluster:up
@@ -22,7 +22,7 @@ Run the Vite client on port 5173 in another terminal:
 npm run dev
 ```
 
-Open `http://localhost:5173` in two browser tabs or windows. Both browser clients connect to the load balancer at `http://localhost:3000`; Nginx distributes WebSocket handshakes across backend ports `3001`, `3002`, and `3003`.
+Open `http://localhost:5173` in two browser tabs or windows. Both browser clients connect to the load balancer at `http://localhost:3000`; Nginx distributes matchmaking connections across backend ports `3001`–`3005`. Once a match is assigned, each browser opens a second Socket.IO connection directly to the match owner, authenticates it with its existing session token, and closes its matchmaking connection only after authentication succeeds.
 
 In each tab choose **Play Vs PVP**, enter a different username, and choose **Quick Match**. Make a legal move and confirm both boards update. The server rejects illegal moves; backend logs show which server owns the match and the version of each accepted move.
 
@@ -33,12 +33,14 @@ curl http://localhost:3000/healthz
 curl http://localhost:3001/healthz
 curl http://localhost:3002/healthz
 curl http://localhost:3003/healthz
+curl http://localhost:3004/healthz
+curl http://localhost:3005/healthz
 ```
 
 The load-balancer health endpoint proxies to one healthy backend and returns its `serverId` and port. Repeat requests to see backend selection. To view connections, ownership, and accepted-move logs:
 
 ```bash
-docker compose logs -f game-server-1 game-server-2 game-server-3
+docker compose logs -f game-server-1 game-server-2 game-server-3 game-server-4 game-server-5
 ```
 
 To stop the cluster while keeping database data:
@@ -50,8 +52,9 @@ npm run cluster:down
 ## PvP behavior
 
 - The first matched player receives White and the second receives Black.
-- All three backend containers share one Redis instance and one PostgreSQL instance.
+- All five backend containers share one Redis instance and one PostgreSQL instance.
 - Each match records the backend that created it as its authoritative owner. Moves received by another backend are sent to that owner for validation and serialized processing.
+- The server that atomically takes a pair from the shared queue is the selected match owner. Both clients authenticate their direct connection to that owner using the existing session token; no Redis keys or PostgreSQL schema are added for handoff.
 - The Socket.IO Redis adapter forwards game-state and other room emissions to clients connected to any backend.
 - Clients use WebSocket-only transport through Nginx, so HTTP long-polling session affinity is not required.
 - Match creation atomically claims both queued players in Redis. Backend startup does not flush shared matchmaking or game keys.
@@ -66,13 +69,13 @@ npm run cluster:down
 - Redis stores the FIFO matchmaking queue, active player session state, and game snapshots.
 - Play Vs Friend is still a placeholder.
 
-The database schema is in `PVPServices/Models/schema.sql`. Compose persists PostgreSQL and Redis data in named volumes. PostgreSQL and Redis are exposed on host ports `15432` and `16379`; the application backends are exposed on `3001`–`3003`, and Nginx is exposed on `3000`. The default database credentials are intended for local development only. Set `DATABASE_URL` or `REDIS_URL` to override the server defaults when running a backend outside Compose.
+The database schema is in `PVPServices/Models/schema.sql`. Compose persists PostgreSQL and Redis data in named volumes. PostgreSQL and Redis are exposed on host ports `15432` and `16379`; the application backends are exposed on `3001`–`3005`, and Nginx is exposed on `3000`. The default database credentials are intended for local development only. Set `DATABASE_URL` or `REDIS_URL` to override the server defaults when running a backend outside Compose.
 
-For Vite development, `.env.development` sets `VITE_PVP_URL=http://localhost:3000`. Override `VITE_PVP_URL` at build time for another deployment. Do not put database credentials or other private values in `VITE_` variables.
+For Vite development, `.env.development` sets `VITE_PVP_URL=http://localhost:3000`. Override `VITE_PVP_URL` at build time for another deployment. Each backend advertises its browser-reachable URL using `PVP_PUBLIC_URL`; Compose defaults these to `http://localhost:3001` through `http://localhost:3005`. The `PVP_GAME_SERVER_URLS` mapping lets every backend resolve the authoritative owner's public URL, including when a player reconnects through another server. For deployment, set `PVP_GAME_SERVER_1_URL` through `PVP_GAME_SERVER_5_URL`, provide the matching `PVP_GAME_SERVER_URLS` mapping, and set `PVP_CORS_ORIGINS` to the frontend origins. Do not put database credentials or other private values in `VITE_` variables.
 
 ## Cluster boundaries
 
-This setup keeps each browser's physical Socket.IO connection on whichever backend Nginx selected. Both players share one logical game whose authoritative owner validates every move; the clients are not disconnected and physically transferred to that owner process after matchmaking. Nginx uses passive failure handling (`max_fails`/`fail_timeout`), while health checks are available at each backend and through the balancer.
+The matchmaking connection initially lands on whichever backend Nginx selects. After a match is assigned, clients connect directly to the authoritative owner, authenticate using their existing session tokens, and then disconnect the original sockets. Both players share one logical game whose authoritative owner validates every move. Nginx uses passive failure handling (`max_fails`/`fail_timeout`), while health checks are available at each backend and through the balancer.
 
 If the authoritative owner process fails, that match's moves fail closed rather than being accepted by a different process. Automatic owner election/failover and durable move transactions are not included and need a separate design.
 
@@ -80,7 +83,7 @@ If the authoritative owner process fails, that match's moves fail closed rather 
 
 ```bash
 npm run dev          # Start Vite on port 5173
-npm run cluster:up   # Start PostgreSQL, Redis, 3 backends, and Nginx
+npm run cluster:up   # Start PostgreSQL, Redis, 5 backends, and Nginx
 npm run cluster:down # Stop the cluster (preserve named-volume data)
 npm run build        # Build the client
 npm run lint         # Run ESLint
