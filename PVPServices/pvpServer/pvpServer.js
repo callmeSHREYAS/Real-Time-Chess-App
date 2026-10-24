@@ -27,6 +27,7 @@ import {
     getQueueLength,
     heartbeatGameServer,
     initializeRedis,
+    markGamePlayerDisconnected,
     removeGame,
     removePlayer,
     removePlayerBySessionToken,
@@ -218,14 +219,17 @@ async function pairPlayers() {
 
 async function endGame(game, leavingSocketId = null, reason = 'Match ended') {
     const socketIds = game.players.map(player => player.socketId).filter(Boolean)
-    await Promise.all(game.players.map(player => new Promise(resolve => {
-        const playerReason = player.socketId === leavingSocketId
-            ? 'You left the match.'
-            : reason
-        io.to(player.socketId).timeout(1500).emit('match-ended', {
-            reason: playerReason,
-        }, () => resolve())
-    })))
+    const allPlayersDisconnected = game.players.every(player => player.disconnectedAt != null)
+    if (!allPlayersDisconnected) {
+        await Promise.all(game.players.map(player => new Promise(resolve => {
+            const playerReason = player.socketId === leavingSocketId
+                ? 'You left the match.'
+                : reason
+            io.to(player.socketId).timeout(1500).emit('match-ended', {
+                reason: playerReason,
+            }, () => resolve())
+        })))
+    }
 
     try {
         await removeGame(game.matchId)
@@ -548,7 +552,7 @@ io.on('connection', socket => {
 
     socket.on('leave-queue', () => queueSocketEvent(async () => {
         await removeQueuedPlayer(socket.id)
-        socket.emit('queue-left')
+        socket.emit ('queue-left')
     }))
 
     socket.on('leave match', acknowledge => queueSocketEvent(async () => {
@@ -619,18 +623,40 @@ io.on('connection', socket => {
             if (game && gamePlayer && player.sessionToken && !gameIsOver) {
                 const disconnectedAt = new Date().toISOString()
                 player.disconnectedAt = disconnectedAt
-                gamePlayer.disconnectedAt = disconnectedAt
-
-                await setGame(game)
                 await setPlayer(player)
                 await saveDisconnectedUser(player.name, player.sessionToken, disconnectedAt)
+                const updatedGame = await markGamePlayerDisconnected(
+                    game.matchId,
+                    player.sessionToken,
+                    disconnectedAt,
+                )
+                if (!updatedGame) {
+                    await Promise.all([
+                        removePlayer(socket.id),
+                        removeSocketPlayer(socket.id),
+                        removeDisconnectedUser(player.name, player.sessionToken),
+                    ])
+                    return
+                }
                 await removePlayer(socket.id, { preserveSessionToken: true })
                 await removeSocketPlayer(socket.id)
+
+                if (updatedGame.players.every(candidate => candidate.disconnectedAt != null)) {
+                    const result = await dispatchToOwner(updatedGame, 'end-game', {
+                        matchId: updatedGame.matchId,
+                        reason: 'Both players disconnected. The match has ended.',
+                    })
+                    if (!result?.ok) {
+                        throw new Error(`Could not end match ${updatedGame.matchId} after both players disconnected`)
+                    }
+                    return
+                }
+
                 setTimeout(() => queueSocketEvent(
                     () => expireDisconnectedPlayer(player.name, player.sessionToken, disconnectedAt),
                 ), RECONNECT_GRACE_MS)
 
-                const opponent = game.players.find(candidate => candidate.sessionToken !== player.sessionToken)
+                const opponent = updatedGame.players.find(candidate => candidate.sessionToken !== player.sessionToken)
                 if (opponent) {
                     io.to(opponent.socketId).emit('opponent-disconnected', {
                         name: player.name,
