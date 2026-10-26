@@ -58,6 +58,8 @@ npm run cluster:down
 - The Socket.IO Redis adapter forwards game-state and other room emissions to clients connected to any backend.
 - Clients use WebSocket-only transport through Nginx, so HTTP long-polling session affinity is not required.
 - Match creation atomically claims both queued players in Redis. Backend startup does not flush shared matchmaking or game keys.
+- If a matchmaking server disconnects a queued client, the client reconnects through Nginx and the old queue socket ID is atomically replaced while preserving that player's queue position.
+- If a match owner becomes unreachable, a connected client recovers through the load balancer. Redis atomically changes the existing match's `ownerId` to the first recovery server; the other client is redirected to that owner. Existing session tokens and Redis/PostgreSQL data structures are reused, and stale writes from the previous owner are rejected.
 - A disconnected player can reconnect to the same match for 30 seconds; after that, the match ends and the disconnected player's resume record and session-token mapping are removed.
 - If both players disconnect before either reconnects, the match ends immediately and both players' session-token mappings and disconnected-user records are removed.
 - When a match ends (timeout, leaving, checkmate, or stalemate), both connected players are shown the end reason on the PvP dashboard before the server disconnects their sockets and removes their active player records.

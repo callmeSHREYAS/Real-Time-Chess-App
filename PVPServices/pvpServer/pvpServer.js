@@ -5,6 +5,11 @@ import { setupStartingPosition, Color } from '../../src/computer/engine/board.js
 import { DEFAULT_GAME_STATE } from '../../src/computer/engine/gameState.js'
 import { submitMove } from './gameService.js'
 import {
+    recoverGameOwnership,
+    recoverMatchedPlayer,
+    recoverQueuedPlayer,
+} from './failoverService.js'
+import {
     closeDatabase,
     getDisconnectedUser,
     initializeDatabase,
@@ -57,6 +62,7 @@ const NAME_PATTERN = /^.{2,20}$/u
 const RECONNECT_GRACE_MS = 30_000
 let socketEventQueue = Promise.resolve()
 let ownerOperationQueue = Promise.resolve()
+let isShuttingDown = false
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error(`Invalid PvP port: ${PORT}`)
@@ -81,6 +87,7 @@ function normalizeName(name) {
 function getGameSnapshot(game) {
     return {
         matchId: game.matchId,
+        ownerId: game.ownerId,
         board: game.board,
         currentTurn: game.currentTurn,
         gameState: game.gameState,
@@ -92,6 +99,20 @@ function getGameSnapshot(game) {
     }
 }
 
+function getPlayerGameSnapshot(game, player, recoverySocketId = player.socketId) {
+    return {
+        ...getGameSnapshot(game),
+        yourColor: player.color,
+        yourName: player.name,
+        sessionToken: player.sessionToken,
+        opponentName: game.players.find(
+            candidate => candidate.sessionToken !== player.sessionToken,
+        )?.name || '',
+        gameServerUrl: getGameServerUrl(game),
+        recoverySocketId,
+    }
+}
+
 function getGameServerUrl(game) {
     const url = game.ownerId === SERVER_ID ? GAME_SERVER_URL : GAME_SERVER_URLS.get(game.ownerId)
     if (!url) {
@@ -100,17 +121,16 @@ function getGameServerUrl(game) {
     return url
 }
 
+function canReconnect(disconnectedAt) {
+    if (disconnectedAt == null) return true
+    const disconnectedAtMs = Date.parse(disconnectedAt)
+    return Number.isFinite(disconnectedAtMs)
+        && Date.now() - disconnectedAtMs < RECONNECT_GRACE_MS
+}
+
 function sendGameState(game) {
-    const snapshot = getGameSnapshot(game)
     for (const player of game.players) {
-        io.to(player.socketId).emit('game-state', {
-            ...snapshot,
-            yourColor: player.color,
-            yourName: player.name,
-            sessionToken: player.sessionToken,
-            opponentName: game.players.find(other => other.socketId !== player.socketId)?.name || '',
-            gameServerUrl: getGameServerUrl(game),
-        })
+        io.to(player.socketId).emit('game-state', getPlayerGameSnapshot(game, player))
     }
 }
 
@@ -420,6 +440,58 @@ io.on('owner-request', (request, acknowledge) => {
 io.on('connection', socket => {
     console.log(`Socket connected: server=${SERVER_ID} port=${PORT} socket=${socket.id}`)
 
+    socket.on('recover-game', (request, acknowledge) => queueSocketEvent(async () => {
+        try {
+            const { matchId, sessionToken, failedOwnerId, previousSocketId } = request || {}
+            if (
+                typeof matchId !== 'string'
+                || typeof sessionToken !== 'string'
+                || typeof failedOwnerId !== 'string'
+                || typeof previousSocketId !== 'string'
+            ) {
+                acknowledge?.({ ok: false, reason: 'Invalid game recovery request' })
+                return
+            }
+
+            const recovery = await recoverGameOwnership({
+                matchId,
+                sessionToken,
+                socketId: socket.id,
+                ownerId: SERVER_ID,
+                failedOwnerId,
+                previousSocketId,
+            })
+            if (!recovery) {
+                acknowledge?.({ ok: false, reason: 'This match could not be recovered' })
+                return
+            }
+
+            if (!recovery.claimed) {
+                acknowledge?.({
+                    ok: true,
+                    redirectUrl: getGameServerUrl(recovery.game),
+                    ownerId: recovery.ownerId,
+                })
+                return
+            }
+
+            await socket.join(matchId)
+            const player = recovery.game.players.find(
+                candidate => candidate.sessionToken === sessionToken,
+            )
+            acknowledge?.({
+                ok: true,
+                ownerId: recovery.game.ownerId,
+                snapshot: {
+                    ...getPlayerGameSnapshot(recovery.game, player, socket.id),
+                },
+            })
+        } catch (error) {
+            console.error(`Could not recover match on ${SERVER_ID}:`, error)
+            acknowledge?.({ ok: false, reason: 'Could not recover the match connection' })
+        }
+    }))
+
     socket.on('authenticate-game', (request, acknowledge) => queueSocketEvent(async () => {
         try {
             const { matchId, sessionToken } = request || {}
@@ -434,17 +506,16 @@ io.on('connection', socket => {
             if (
                 !player
                 || player.matchId !== matchId
-                || player.disconnectedAt != null
+                || !canReconnect(player.disconnectedAt)
                 || !game
                 || game.ownerId !== SERVER_ID
                 || !gamePlayer
-                || gamePlayer.disconnectedAt != null
+                || !canReconnect(gamePlayer.disconnectedAt)
             ) {
                 acknowledge?.({ ok: false, reason: 'This match could not be authenticated on this server' })
                 return
             }
 
-            await replaceSocketPlayer(player.socketId, socket.id, player.name)
             const handoff = await handoffGamePlayer(
                 matchId,
                 sessionToken,
@@ -453,11 +524,11 @@ io.on('connection', socket => {
                 player.socketId,
             )
             if (!handoff) {
-                await replaceSocketPlayer(socket.id, player.socketId, player.name)
                 acknowledge?.({ ok: false, reason: 'This match could not be authenticated on this server' })
                 return
             }
 
+            await replaceSocketPlayer(player.socketId, socket.id, player.name)
             await socket.join(matchId)
             const authenticatedGamePlayer = handoff.game.players.find(
                 candidate => candidate.sessionToken === sessionToken,
@@ -465,14 +536,7 @@ io.on('connection', socket => {
             acknowledge?.({
                 ok: true,
                 snapshot: {
-                    ...getGameSnapshot(handoff.game),
-                    yourColor: authenticatedGamePlayer.color,
-                    yourName: authenticatedGamePlayer.name,
-                    sessionToken,
-                    opponentName: handoff.game.players.find(
-                        player => player.sessionToken !== sessionToken,
-                    )?.name || '',
-                    gameServerUrl: getGameServerUrl(handoff.game),
+                    ...getPlayerGameSnapshot(handoff.game, authenticatedGamePlayer, socket.id),
                 },
             })
         } catch (error) {
@@ -484,6 +548,9 @@ io.on('connection', socket => {
     socket.on('join-quick-match', joinRequest => queueSocketEvent(async () => {
         const name = normalizeName(typeof joinRequest === 'string' ? joinRequest : joinRequest?.name)
         const sessionToken = typeof joinRequest === 'object' ? joinRequest?.sessionToken : null
+        const previousSocketId = typeof joinRequest === 'object'
+            ? joinRequest?.previousSocketId
+            : null
 
         if (!NAME_PATTERN.test(name)) {
             socket.emit('queue-error', { reason: 'Name must be between 2 and 20 characters' })
@@ -491,6 +558,28 @@ io.on('connection', socket => {
         }
 
         try {
+            if (typeof previousSocketId === 'string' && previousSocketId !== socket.id) {
+                const recoveredPlayer = await recoverQueuedPlayer(previousSocketId, socket.id)
+                if (recoveredPlayer) {
+                    socket.emit('queue-status', { position: await getQueueLength() })
+                    await pairPlayers()
+                    return
+                }
+
+                const recoveredMatch = await recoverMatchedPlayer(previousSocketId, name)
+                if (recoveredMatch) {
+                    socket.emit(
+                        'game-state',
+                        getPlayerGameSnapshot(
+                            recoveredMatch.game,
+                            recoveredMatch.gamePlayer,
+                            recoveredMatch.player.socketId,
+                        ),
+                    )
+                    return
+                }
+            }
+
             const player = await getPlayer(socket.id)
             if (player?.matchId) {
                 socket.emit('queue-error', { reason: 'You are already in a match' })
@@ -576,6 +665,8 @@ io.on('connection', socket => {
     }))
 
     socket.on('disconnect', () => queueSocketEvent(async () => {
+        if (isShuttingDown) return
+
         await removeQueuedPlayer(socket.id)
         const player = await getPlayer(socket.id)
         if (!player) {
@@ -661,6 +752,7 @@ httpServer.listen(PORT, () => {
 })
 
 async function shutdown() {
+    isShuttingDown = true
     io.close(async () => {
         await Promise.all([closeDatabase(), closeRedis()])
         globalThis.process?.exit(0)
