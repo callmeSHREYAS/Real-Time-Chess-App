@@ -52,6 +52,7 @@ export async function recoverGameOwnership({
     sessionToken,
     socketId,
     ownerId,
+    ownerUrl,
     failedOwnerId,
     previousSocketId,
 }) {
@@ -82,6 +83,7 @@ export async function recoverGameOwnership({
         ownerId,
         failedOwnerId,
         previousSocketId,
+        ownerUrl,
     )
     if (!recovery) return null
     if (!recovery.claimed) return recovery

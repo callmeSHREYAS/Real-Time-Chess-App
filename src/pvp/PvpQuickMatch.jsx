@@ -28,10 +28,11 @@ export default function PvpQuickMatch() {
     const matchmakingUrl = import.meta.env.VITE_PVP_URL || window.location.origin
     let activeMatchSnapshot = null
     let authoritativeSocket = null
-    let playerSocketId = null
-    let currentBootstrapSocketId = null
     let previousQueueSocketId = null
+    let currentQueueSocketId = null
     let recoveryRequest = null
+    let recoveryStartedAt = 0
+    let recoveryTimer = null
     let handoffTargetUrl = null
     const intentionallyDisconnected = new WeakSet()
     const socket = io(matchmakingUrl, {
@@ -51,9 +52,11 @@ export default function PvpQuickMatch() {
     }
 
     function showGameState(nextSnapshot, gameSocket) {
-      activeMatchSnapshot = nextSnapshot
+      activeMatchSnapshot = {
+        ...nextSnapshot,
+        recoverySocketId: gameSocket.id || nextSnapshot.recoverySocketId,
+      }
       authoritativeSocket = gameSocket
-      playerSocketId = nextSnapshot.recoverySocketId || gameSocket.id || playerSocketId
       socketRef.current = gameSocket
       saveSessionToken(nextSnapshot.sessionToken)
       setSnapshot(nextSnapshot)
@@ -61,48 +64,60 @@ export default function PvpQuickMatch() {
       setError('')
     }
 
-    function handleRecoveryResult(result) {
-      const previousSocketId = recoveryRequest?.previousSocketId
-      recoveryRequest = null
-      if (!result?.ok) {
-        setError(result?.reason || 'Could not recover the match connection.')
-        return
-      }
-
-      if (result.redirectUrl) {
-        playerSocketId = previousSocketId || playerSocketId
-        activeMatchSnapshot = {
-          ...activeMatchSnapshot,
-          ownerId: result.ownerId,
-          gameServerUrl: result.redirectUrl,
-        }
-        connectToOwner(result.redirectUrl, {
-          matchId: activeMatchSnapshot.matchId,
-          sessionToken: activeMatchSnapshot.sessionToken,
-        })
-        return
-      }
-
-      showGameState(result.snapshot, socket)
-    }
-
     function requestGameRecovery() {
       if (!recoveryRequest || !socket.connected) return
-      socket.emit('recover-game', recoveryRequest, handleRecoveryResult)
+
+      socket.timeout(4000).emit('recover-game', recoveryRequest, (timeoutError, result) => {
+        if (timeoutError) {
+          result = { ok: false, reason: 'The match server did not respond. Retrying...' }
+        }
+        if (!result?.ok) {
+          setError(result?.reason || 'Could not recover the match connection. Retrying...')
+          if (Date.now() - recoveryStartedAt < 30_000) {
+            recoveryTimer = window.setTimeout(requestGameRecovery, 1000)
+          } else {
+            recoveryRequest = null
+          }
+          return
+        }
+
+        if (result.redirectUrl) {
+          activeMatchSnapshot = {
+            ...activeMatchSnapshot,
+            ownerId: result.ownerId,
+            gameServerUrl: result.redirectUrl,
+          }
+          connectToOwner(result.redirectUrl, {
+            matchId: activeMatchSnapshot.matchId,
+            sessionToken: activeMatchSnapshot.sessionToken,
+            previousSocketId: recoveryRequest.previousSocketId,
+          }, false)
+          return
+        }
+
+        recoveryRequest = null
+        window.clearTimeout(recoveryTimer)
+        showGameState(result.snapshot, socket)
+      })
     }
 
     function recoverAfterDisconnect(failedSocket) {
-      if (!activeMatchSnapshot || recoveryRequest || matchEndingRef.current) return
+      if (!activeMatchSnapshot || matchEndingRef.current) return
+      if (recoveryRequest) {
+        if (socket.connected) requestGameRecovery()
+        return
+      }
 
       const previousSocketId = failedSocket === authoritativeSocket
-        ? failedSocket.id || playerSocketId || socket.id
-        : playerSocketId || socket.id
+        ? failedSocket.id || activeMatchSnapshot.recoverySocketId
+        : activeMatchSnapshot.recoverySocketId || failedSocket.id
       recoveryRequest = {
         matchId: activeMatchSnapshot.matchId,
         sessionToken: activeMatchSnapshot.sessionToken,
         failedOwnerId: activeMatchSnapshot.ownerId,
         previousSocketId,
       }
+      recoveryStartedAt = Date.now()
       setMessage('Match server disconnected. Reconnecting...')
       setError('')
 
@@ -117,7 +132,7 @@ export default function PvpQuickMatch() {
       }
     }
 
-    function connectToOwner(targetUrl, credentials) {
+    function connectToOwner(targetUrl, credentials, useHandoffToken) {
       const normalizedUrl = new URL(targetUrl, window.location.origin).origin
       if (handoffTargetUrl === normalizedUrl) return
       handoffTargetUrl = normalizedUrl
@@ -126,81 +141,42 @@ export default function PvpQuickMatch() {
 
       const gameSocket = io(normalizedUrl, {
         transports: ['websocket'],
+        autoConnect: false,
         reconnection: false,
         timeout: 5000,
       })
       pendingSocketRef.current = gameSocket
-      bindGameEvents(gameSocket)
-      gameSocket.on('connect', () => {
-        gameSocket.emit('authenticate-game', credentials, result => {
-          if (!result?.ok) {
-            handoffTargetUrl = null
-            pendingSocketRef.current = null
-            disconnectIntentionally(gameSocket)
-            setError(result?.reason || 'Could not authenticate with the match server.')
-            if (activeMatchSnapshot) recoverAfterDisconnect(gameSocket)
-            return
-          }
-
-          handoffTargetUrl = null
-          pendingSocketRef.current = null
-          showGameState(result.snapshot, gameSocket)
-          playerSocketId = gameSocket.id
-          if (authoritativeSocket !== socket) {
-            disconnectIntentionally(socket)
-          }
-        })
-      })
-      gameSocket.on('connect_error', () => {
+      gameSocket.on('match-authenticated', authentication => {
+        activeMatchSnapshot = {
+          ...activeMatchSnapshot,
+          ...authentication,
+          gameServerUrl: authentication.gameServerUrl || normalizedUrl,
+        }
+        authoritativeSocket = gameSocket
         handoffTargetUrl = null
         pendingSocketRef.current = null
-        setError('Could not connect to the match server. Trying another server...')
-        if (activeMatchSnapshot) {
-          recoverAfterDisconnect(gameSocket)
-        } else if (socket.connected) {
-          recoveryRequest = {
-            matchId: credentials.matchId,
-            sessionToken: credentials.sessionToken,
-            failedOwnerId: activeMatchSnapshot?.ownerId,
-            previousSocketId: socket.id,
-          }
-          if (recoveryRequest.failedOwnerId) requestGameRecovery()
-        } else {
-          socket.connect()
+        recoveryRequest = null
+        window.clearTimeout(recoveryTimer)
+        socketRef.current = gameSocket
+        saveSessionToken(authentication.sessionToken)
+        setMessage('')
+        setError('')
+        if (socket.connected) disconnectIntentionally(socket)
+      })
+      gameSocket.on('game-state', nextSnapshot => {
+        showGameState(nextSnapshot, gameSocket)
+      })
+      gameSocket.on('match-auth-error', ({ reason }) => {
+        handoffTargetUrl = null
+        pendingSocketRef.current = null
+        setError(reason || 'Could not authenticate with the match server.')
+        if (recoveryRequest && !useHandoffToken) {
+          recoveryRequest = null
+          disconnectIntentionally(gameSocket)
+          return
         }
+        recoverAfterDisconnect(gameSocket)
       })
-    }
-
-    function handleGameState(sourceSocket, nextSnapshot) {
-      saveSessionToken(nextSnapshot.sessionToken)
-      activeMatchSnapshot = nextSnapshot
-      playerSocketId = nextSnapshot.recoverySocketId || sourceSocket.id || playerSocketId
-      if (sourceSocket === authoritativeSocket) {
-        showGameState(nextSnapshot, sourceSocket)
-        return
-      }
-
-      const targetUrl = nextSnapshot.gameServerUrl
-        ? new URL(nextSnapshot.gameServerUrl, window.location.origin).origin
-        : null
-      if (!targetUrl) {
-        setError('The match server did not provide a connection address.')
-        return
-      }
-
-      if (targetUrl === new URL(matchmakingUrl, window.location.origin).origin) {
-        showGameState(nextSnapshot, sourceSocket)
-        return
-      }
-
-      connectToOwner(targetUrl, {
-        matchId: nextSnapshot.matchId,
-        sessionToken: nextSnapshot.sessionToken,
-      })
-    }
-
-    function bindGameEvents(gameSocket) {
-      gameSocket.on('game-state', nextSnapshot => handleGameState(gameSocket, nextSnapshot))
       gameSocket.on('move-rejected', ({ reason }) => setError(reason))
       gameSocket.on('match-ended', ({ reason }, acknowledge) => {
         matchEndingRef.current = true
@@ -215,15 +191,37 @@ export default function PvpQuickMatch() {
         setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
       })
       gameSocket.on('disconnect', () => {
-        if (intentionallyDisconnected.has(gameSocket)) return
-        if (gameSocket === authoritativeSocket && activeMatchSnapshot) {
+        if (!intentionallyDisconnected.has(gameSocket)) {
+          handoffTargetUrl = null
+          pendingSocketRef.current = null
           recoverAfterDisconnect(gameSocket)
         }
       })
+      gameSocket.on('connect_error', () => {
+        handoffTargetUrl = null
+        pendingSocketRef.current = null
+        setError('Could not connect to the match server. Trying another server...')
+        recoverAfterDisconnect(gameSocket)
+      })
+      gameSocket.on('connect', () => {
+        if (useHandoffToken && credentials.handoffToken) {
+          gameSocket.emit('authenticate-match', {
+            matchId: credentials.matchId,
+            handoffToken: credentials.handoffToken,
+          })
+        } else {
+          gameSocket.emit('authenticate-game', {
+            matchId: credentials.matchId,
+            sessionToken: credentials.sessionToken,
+            previousSocketId: credentials.previousSocketId,
+          })
+        }
+      })
+      gameSocket.connect()
     }
 
     socket.on('connect', () => {
-      currentBootstrapSocketId = socket.id
+      currentQueueSocketId = socket.id
       if (recoveryRequest) {
         requestGameRecovery()
         return
@@ -236,32 +234,62 @@ export default function PvpQuickMatch() {
         sessionToken: sessionTokenStorageKey ? localStorage.getItem(sessionTokenStorageKey) : null,
         previousSocketId: previousQueueSocketId,
       })
-      previousQueueSocketId = null
     })
     socket.on('queue-status', ({ position }) => {
+      previousQueueSocketId = null
+      currentQueueSocketId = socket.id
       setMessage(position === 1 ? 'Waiting for an opponent...' : `Waiting in position ${position}...`)
     })
     socket.on('queue-error', ({ reason }) => setError(reason))
-    bindGameEvents(socket)
-    socket.on('connect_error', () => setError('Could not connect to the PvP server.'))
+    socket.on('match-handoff', handoff => {
+      previousQueueSocketId = null
+      activeMatchSnapshot = {
+        ...activeMatchSnapshot,
+        matchId: handoff.matchId,
+        ownerId: handoff.ownerId,
+        gameServerUrl: handoff.serverUrl,
+        sessionToken: handoff.sessionToken,
+        recoverySocketId: handoff.previousSocketId,
+      }
+      saveSessionToken(handoff.sessionToken)
+      connectToOwner(handoff.serverUrl, handoff, Boolean(handoff.handoffToken))
+    })
+    socket.on('game-state', nextSnapshot => {
+      if (authoritativeSocket === socket) showGameState(nextSnapshot, socket)
+    })
+    socket.on('move-rejected', ({ reason }) => setError(reason))
+    socket.on('match-ended', ({ reason }, acknowledge) => {
+      matchEndingRef.current = true
+      if (sessionTokenStorageKey) localStorage.removeItem(sessionTokenStorageKey)
+      navigate('/pvp', {
+        replace: true,
+        state: { matchEndReason: reason },
+      })
+      window.setTimeout(() => {
+        acknowledge?.()
+      }, 100)
+    })
+    socket.on('opponent-disconnected', ({ name: opponentName }) => {
+      setMessage(`${opponentName} disconnected. Waiting for them to reconnect...`)
+    })
     socket.on('disconnect', () => {
       if (intentionallyDisconnected.has(socket)) return
-      if (socket === authoritativeSocket && activeMatchSnapshot) {
+      if (activeMatchSnapshot) {
         recoverAfterDisconnect(socket)
-      } else if (!activeMatchSnapshot) {
-        previousQueueSocketId = currentBootstrapSocketId || socket.id
-        currentBootstrapSocketId = null
+      } else {
+        previousQueueSocketId = currentQueueSocketId || previousQueueSocketId
+        currentQueueSocketId = null
+        setMessage('Matchmaking connection lost. Reconnecting...')
       }
+    })
+    socket.on('connect_error', () => {
+      setError('Could not connect to the PvP server. Reconnecting...')
     })
 
     return () => {
-      if (!matchEndingRef.current) {
-        socket.emit('leave-queue')
-      }
+      window.clearTimeout(recoveryTimer)
+      if (!matchEndingRef.current && !activeMatchSnapshot) socket.emit('leave-queue')
       disconnectIntentionally(socket)
-      if (socketRef.current && socketRef.current !== socket) {
-        disconnectIntentionally(socketRef.current)
-      }
       if (pendingSocketRef.current) disconnectIntentionally(pendingSocketRef.current)
       socketRef.current = null
       pendingSocketRef.current = null
@@ -285,8 +313,10 @@ export default function PvpQuickMatch() {
         return
       }
 
+      matchEndingRef.current = true
       if (!snapshot) {
         socket.disconnect()
+        pendingSocketRef.current?.disconnect()
         navigate('/pvp')
       }
     })

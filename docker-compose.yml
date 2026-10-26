@@ -1,3 +1,9 @@
+x-pvp-common-env: &pvp-common-env
+  REDIS_URL: redis://redis:6379
+  DATABASE_URL: postgres://chess:chess@postgres:5432/chess
+  PVP_GAME_SERVERS: "[{\"id\":\"game-01\",\"url\":\"${PVP_GAME_SERVER_1_URL:-http://localhost:3001}\"},{\"id\":\"game-02\",\"url\":\"${PVP_GAME_SERVER_2_URL:-http://localhost:3002}\"},{\"id\":\"game-03\",\"url\":\"${PVP_GAME_SERVER_3_URL:-http://localhost:3003}\"},{\"id\":\"game-04\",\"url\":\"${PVP_GAME_SERVER_4_URL:-http://localhost:3004}\"},{\"id\":\"game-05\",\"url\":\"${PVP_GAME_SERVER_5_URL:-http://localhost:3005}\"}]"
+  PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -32,11 +38,10 @@ services:
   game-server-1:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-01
       PVP_PORT: 3001
       PVP_PUBLIC_URL: ${PVP_GAME_SERVER_1_URL:-http://localhost:3001}
-      PVP_GAME_SERVER_URLS: ${PVP_GAME_SERVER_URLS:-game-01=http://localhost:3001,game-02=http://localhost:3002,game-03=http://localhost:3003,game-04=http://localhost:3004,game-05=http://localhost:3005}
-      PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://chess:chess@postgres:5432/chess
     ports:
@@ -55,11 +60,10 @@ services:
   game-server-2:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-02
       PVP_PORT: 3002
       PVP_PUBLIC_URL: ${PVP_GAME_SERVER_2_URL:-http://localhost:3002}
-      PVP_GAME_SERVER_URLS: ${PVP_GAME_SERVER_URLS:-game-01=http://localhost:3001,game-02=http://localhost:3002,game-03=http://localhost:3003,game-04=http://localhost:3004,game-05=http://localhost:3005}
-      PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://chess:chess@postgres:5432/chess
     ports:
@@ -78,11 +82,10 @@ services:
   game-server-3:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-03
       PVP_PORT: 3003
       PVP_PUBLIC_URL: ${PVP_GAME_SERVER_3_URL:-http://localhost:3003}
-      PVP_GAME_SERVER_URLS: ${PVP_GAME_SERVER_URLS:-game-01=http://localhost:3001,game-02=http://localhost:3002,game-03=http://localhost:3003,game-04=http://localhost:3004,game-05=http://localhost:3005}
-      PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://chess:chess@postgres:5432/chess
     ports:
@@ -101,13 +104,9 @@ services:
   game-server-4:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-04
       PVP_PORT: 3004
-      PVP_PUBLIC_URL: ${PVP_GAME_SERVER_4_URL:-http://localhost:3004}
-      PVP_GAME_SERVER_URLS: ${PVP_GAME_SERVER_URLS:-game-01=http://localhost:3001,game-02=http://localhost:3002,game-03=http://localhost:3003,game-04=http://localhost:3004,game-05=http://localhost:3005}
-      PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgres://chess:chess@postgres:5432/chess
     ports:
       - "3004:3004"
     depends_on:
@@ -124,13 +123,9 @@ services:
   game-server-5:
     build: .
     environment:
+      <<: *pvp-common-env
       PVP_SERVER_ID: game-05
       PVP_PORT: 3005
-      PVP_PUBLIC_URL: ${PVP_GAME_SERVER_5_URL:-http://localhost:3005}
-      PVP_GAME_SERVER_URLS: ${PVP_GAME_SERVER_URLS:-game-01=http://localhost:3001,game-02=http://localhost:3002,game-03=http://localhost:3003,game-04=http://localhost:3004,game-05=http://localhost:3005}
-      PVP_CORS_ORIGINS: ${PVP_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
-      REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgres://chess:chess@postgres:5432/chess
     ports:
       - "3005:3005"
     depends_on:

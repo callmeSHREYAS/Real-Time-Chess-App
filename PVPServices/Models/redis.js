@@ -5,6 +5,8 @@ const QUEUE_KEY = 'pvp:queue'
 const PLAYERS_KEY = 'pvp:players'
 const SESSION_PLAYERS_KEY = 'pvp:players-by-session-token'
 const GAMES_KEY = 'pvp:games'
+const SERVER_COUNTER_KEY = 'pvp:game-server-selection'
+const HANDOFF_TOKEN_PREFIX = 'pvp:handoff:'
 
 export const redis = createClient({
     url: globalThis.process?.env?.REDIS_URL || 'redis://127.0.0.1:16379',
@@ -85,6 +87,43 @@ export async function removeQueuedPlayer(socketId) {
 
 export async function getQueueLength() {
     return redis.lLen(QUEUE_KEY)
+}
+
+export async function heartbeatGameServer(serverId) {
+    await redis.set(`pvp:server-heartbeat:${serverId}`, '1', { EX: 15 })
+}
+
+export async function selectGameServer(servers) {
+    if (!servers.length) throw new Error('No PvP game servers are configured')
+
+    const heartbeats = await redis.mGet(
+        servers.map(server => `pvp:server-heartbeat:${server.id}`),
+    )
+    const availableServers = servers.filter((_, index) => heartbeats[index] !== null)
+    if (!availableServers.length) throw new Error('No PvP game servers are available')
+
+    const selection = await redis.incr(SERVER_COUNTER_KEY)
+    return availableServers[(selection - 1) % availableServers.length]
+}
+
+export async function createHandoffToken(token, credential) {
+    await redis.set(`${HANDOFF_TOKEN_PREFIX}${token}`, JSON.stringify(credential), { EX: 60 })
+}
+
+export async function consumeHandoffToken(token, matchId, ownerId) {
+    const serializedCredential = await redis.eval(
+        `local credential = redis.call('GET', KEYS[1])
+         if not credential then return false end
+         local decoded = cjson.decode(credential)
+         if decoded.matchId ~= ARGV[1] or decoded.ownerId ~= ARGV[2] then return false end
+         redis.call('DEL', KEYS[1])
+         return credential`,
+        {
+            keys: [`${HANDOFF_TOKEN_PREFIX}${token}`],
+            arguments: [matchId, ownerId],
+        },
+    )
+    return serializedCredential ? JSON.parse(serializedCredential) : null
 }
 
 export async function takeQueuedPair() {
@@ -304,7 +343,15 @@ export async function handoffGamePlayer(matchId, sessionToken, socketId, ownerId
     }
 }
 
-export async function claimFailedGame(matchId, sessionToken, socketId, ownerId, failedOwnerId, previousSocketId) {
+export async function claimFailedGame(
+    matchId,
+    sessionToken,
+    socketId,
+    ownerId,
+    failedOwnerId,
+    previousSocketId,
+    ownerUrl,
+) {
     const result = await redis.eval(
         `local serializedPlayer = redis.call('HGET', KEYS[1], ARGV[2])
          if not serializedPlayer then return { -1 } end
@@ -333,6 +380,7 @@ export async function claimFailedGame(matchId, sessionToken, socketId, ownerId, 
          if not matched then return { -1 } end
 
          game.ownerId = ARGV[4]
+         game.ownerUrl = ARGV[7]
          player.socket_id = ARGV[3]
          player.socketId = nil
          player.disconnectedAt = cjson.null
@@ -353,7 +401,7 @@ export async function claimFailedGame(matchId, sessionToken, socketId, ownerId, 
          return { 1, oldSocketId, updatedGame, cjson.encode(player) }`,
         {
             keys: [SESSION_PLAYERS_KEY, GAMES_KEY, PLAYERS_KEY],
-            arguments: [matchId, sessionToken, socketId, ownerId, failedOwnerId, previousSocketId],
+            arguments: [matchId, sessionToken, socketId, ownerId, failedOwnerId, previousSocketId, ownerUrl],
         },
     )
     if (!result?.length || result[0] === -1) return null
